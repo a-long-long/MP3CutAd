@@ -198,3 +198,11 @@ FakesAssemblies/
 
 # Visual Studio 6 workspace options file
 *.opt
+
+
+# Added by cargo
+
+/target
+
+# 示例音频（体积较大，本地保留）
+/test_mp3/

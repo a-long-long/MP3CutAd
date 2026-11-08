@@ -1,0 +1,59 @@
+//! GUI 应用入口与主循环
+
+use eframe::egui;
+
+use super::state::SharedState;
+use super::{file_list, fonts, menu, results};
+
+/// 主应用
+struct Mp3CutAdApp {
+    state: SharedState,
+}
+
+impl Mp3CutAdApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            state: Default::default(),
+        }
+    }
+}
+
+impl eframe::App for Mp3CutAdApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        menu::menu_bar(ctx, &self.state);
+        menu::status_bar(ctx, &self.state);
+        file_list::show(ctx, &self.state);
+        results::show(ctx, &self.state);
+
+        // 处理中或播放中时持续重绘
+        let needs_repaint = {
+            let s = self.state.lock().unwrap();
+            s.is_processing || s.playback.playing_file.is_some()
+        };
+        if needs_repaint {
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// 启动 GUI
+pub fn run() -> eframe::Result<()> {
+    env_logger::init();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 600.0])
+            .with_min_inner_size([800.0, 400.0])
+            .with_title("MP3CutAd-RS - MP3 广告检测与裁剪"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "MP3CutAd-RS",
+        options,
+        Box::new(|cc| {
+            fonts::setup_chinese_font(&cc.egui_ctx);
+            Ok(Box::new(Mp3CutAdApp::new(cc)))
+        }),
+    )
+}
