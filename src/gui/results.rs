@@ -40,6 +40,13 @@ pub fn show(ctx: &Context, state: &SharedState) {
         ));
         ui.separator();
 
+        // 滚动条改为非悬浮并收窄：悬浮滚动条会覆盖在音频条右端，
+        // 导致尾部广告段被遮挡、难以点击。非悬浮模式会为滚动条保留独立空间。
+        ui.spacing_mut().scroll.floating = false;
+        ui.spacing_mut().scroll.bar_width = 8.0;
+        ui.spacing_mut().scroll.bar_inner_margin = 2.0;
+        ui.spacing_mut().scroll.bar_outer_margin = 2.0;
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             let colors = ad_colors();
             for (file_idx, file) in &detected {
