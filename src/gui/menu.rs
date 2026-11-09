@@ -125,8 +125,11 @@ fn add_files(state: &SharedState) {
     let state = state.clone();
     thread::spawn(move || {
         let paths = rfd::FileDialog::new()
-            .add_filter("MP3 文件", &["mp3"])
-            .set_title("选择 MP3 文件")
+            .add_filter(
+                "音频文件",
+                &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "wma"],
+            )
+            .set_title("选择音频文件")
             .pick_files();
 
         if let Some(paths) = paths {
@@ -154,12 +157,9 @@ fn add_directory(state: &SharedState) {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                let is_mp3 = file_path
-                    .extension()
-                    .map(|e| e.eq_ignore_ascii_case("mp3"))
-                    .unwrap_or(false);
+                let is_audio = crate::pipeline::is_supported_audio(&file_path);
 
-                if is_mp3 && !s.files.iter().any(|f| f.path == file_path) {
+                if is_audio && !s.files.iter().any(|f| f.path == file_path) {
                     s.files.push(FileInfo::from_path(file_path));
                     count += 1;
                 }

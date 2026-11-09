@@ -99,7 +99,7 @@ where
             None => {
                 let wav_path = cache::wav_path(mp3_path);
                 if !cache::is_fresh(mp3_path, &wav_path) {
-                    ffmpeg::mp3_to_wav(mp3_path, &wav_path)?;
+                    ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
                 }
                 let data = fft::process_wav(&wav_path)?;
                 cache::save_fft(mp3_path, &data)?;

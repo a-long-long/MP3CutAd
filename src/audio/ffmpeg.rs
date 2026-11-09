@@ -1,6 +1,6 @@
 //! FFmpeg 封装模块
 //!
-//! 提供 MP3/WAV 转换和音频裁剪功能
+//! 提供音频解码（转 WAV）和音频裁剪功能，支持 ffmpeg 能解码的所有格式
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -36,12 +36,12 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// 将 MP3 转换为 WAV（单声道，22050Hz）
+/// 将任意音频格式转换为 WAV（单声道，22050Hz），用于特征提取
 ///
 /// # 参数
-/// - `input`: 输入 MP3 文件路径
+/// - `input`: 输入音频文件路径（mp3/wav/flac/m4a/aac/ogg/opus/wma 等）
 /// - `output`: 输出 WAV 文件路径
-pub fn mp3_to_wav(input: &Path, output: &Path) -> Result<()> {
+pub fn audio_to_wav(input: &Path, output: &Path) -> Result<()> {
     run_ffmpeg(&[
         "-i",
         input.to_str().unwrap(),
@@ -80,45 +80,70 @@ pub fn split_audio(input: &Path, output: &Path, from_sec: f64, to_sec: f64) -> R
 
 /// 拼接多个音频文件
 ///
+/// mp3/wav 使用流拷贝（无重编码损耗）；flac 无损重编码，
+/// 其余有损格式（ogg/opus/m4a/aac/wma）重编码一次——这些容器
+/// 用流拷贝拼接容易出现时长元数据错误或时间戳混乱。
+///
 /// # 参数
 /// - `list_file`: 包含文件列表的文本文件（每行格式：file 'path'）
 /// - `output`: 输出文件路径
 pub fn concat_audio(list_file: &Path, output: &Path) -> Result<()> {
-    run_ffmpeg(&[
+    let ext = output
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let codec_args: Vec<String> = match ext.as_str() {
+        "mp3" | "wav" => vec!["-c".into(), "copy".into()],
+        "flac" => vec!["-c:a".into(), "flac".into()],
+        "ogg" => vec!["-c:a".into(), "libvorbis".into()],
+        "opus" => vec!["-c:a".into(), "libopus".into()],
+        // m4a/aac/wma 等：让 ffmpeg 按容器选择默认编码器
+        _ => Vec::new(),
+    };
+
+    let mut args: Vec<&str> = vec![
         "-f",
         "concat",
         "-safe",
         "0", // 允许列表中使用绝对路径
         "-i",
         list_file.to_str().unwrap(),
-        "-c",
-        "copy",
-        "-y",
-        output.to_str().unwrap(),
-    ])
+    ];
+    args.extend(codec_args.iter().map(String::as_str));
+    args.extend(["-y", output.to_str().unwrap()]);
+
+    run_ffmpeg(&args)
 }
 
 /// 裁剪并拼接音频（按照 C# 版本的逻辑）
 ///
+/// 输出容器格式由 `output` 的扩展名决定，保持与原文件一致。
+///
 /// # 参数
-/// - `mp3`: 输入 MP3 文件
+/// - `input`: 输入音频文件
 /// - `output`: 输出文件
 /// - `segments`: 要保留的时间段列表（单位：0.1秒）
-pub fn cut_and_combine(mp3: &Path, output: &Path, segments: &[(i32, i32)]) -> Result<()> {
+pub fn cut_and_combine(input: &Path, output: &Path, segments: &[(i32, i32)]) -> Result<()> {
     // 临时文件创建在输出文件旁边（与 C# 版本一致）
     let output_dir = output.parent().unwrap_or(Path::new("."));
     let base_name = output.file_stem().unwrap_or_default().to_string_lossy();
+    // 临时片段使用与输出相同的扩展名，保证 -c copy 产出相同容器
+    let ext = output
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mp3".to_string());
 
     let mut temp_files = Vec::new();
     let mut list_content = String::new();
 
-    // 裁剪每个片段（与 C# 版本：wav + i + ".mp3"）
+    // 裁剪每个片段
     for (i, &(begin, end)) in segments.iter().enumerate() {
         let from_sec = begin as f64 / 10.0;
         let to_sec = end as f64 / 10.0;
 
-        let temp_file = output_dir.join(format!("{}_{}.mp3", base_name, i));
-        split_audio(mp3, &temp_file, from_sec, to_sec)?;
+        let temp_file = output_dir.join(format!("{}_{}.{}", base_name, i, ext));
+        split_audio(input, &temp_file, from_sec, to_sec)?;
 
         list_content.push_str(&format!("file '{}'\n", temp_file.to_str().unwrap()));
         temp_files.push(temp_file);

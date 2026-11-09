@@ -20,9 +20,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 检测 MP3 文件中的广告
+    /// 检测音频文件中的广告
     Detect {
-        /// MP3 文件列表
+        /// 音频文件列表（mp3/wav/flac/m4a/aac/ogg/opus/wma）
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
@@ -31,9 +31,9 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// 裁剪 MP3 文件（根据检测结果）
+    /// 裁剪音频文件（根据检测结果）
     Cut {
-        /// 输入目录（包含 MP3 文件）
+        /// 输入目录（包含音频文件）
         #[arg(short, long)]
         input_dir: PathBuf,
 
@@ -124,18 +124,18 @@ fn cmd_cut(input_dir: &Path, output_dir: &Path, result_file: &Path) -> Result<()
     println!("开始裁剪广告...");
 
     let result = result_io::load(result_file)?;
-    let mp3_files = pipeline::collect_mp3_files(input_dir)?;
+    let audio_files = pipeline::collect_audio_files(input_dir)?;
 
-    if mp3_files.len() != result.ranges.len() {
+    if audio_files.len() != result.ranges.len() {
         bail!(
             "文件数量不匹配: 期望 {}, 实际 {}",
             result.ranges.len(),
-            mp3_files.len()
+            audio_files.len()
         );
     }
 
     std::fs::create_dir_all(output_dir)?;
-    cut_files(&mp3_files, &result, output_dir)?;
+    cut_files(&audio_files, &result, output_dir)?;
 
     println!("\n输出目录: {}", output_dir.display());
     Ok(())
@@ -144,23 +144,23 @@ fn cmd_cut(input_dir: &Path, output_dir: &Path, result_file: &Path) -> Result<()
 fn cmd_auto(input_dir: &Path, output_dir: &Path) -> Result<()> {
     println!("自动模式: 检测并裁剪广告");
 
-    let mp3_files = pipeline::collect_mp3_files(input_dir)?;
+    let audio_files = pipeline::collect_audio_files(input_dir)?;
 
-    if mp3_files.is_empty() {
-        println!("输入目录中没有 MP3 文件");
+    if audio_files.is_empty() {
+        println!("输入目录中没有音频文件");
         return Ok(());
     }
 
-    println!("找到 {} 个 MP3 文件", mp3_files.len());
+    println!("找到 {} 个音频文件", audio_files.len());
 
-    let result = detect_ad(&mp3_files)?;
+    let result = detect_ad(&audio_files)?;
 
     std::fs::create_dir_all(output_dir)?;
-    cut_files(&mp3_files, &result, output_dir)?;
+    cut_files(&audio_files, &result, output_dir)?;
 
     println!("\n处理统计:");
     for (i, ranges) in result.ranges.iter().enumerate() {
-        let file_name = mp3_files[i].file_name().unwrap().to_string_lossy();
+        let file_name = audio_files[i].file_name().unwrap().to_string_lossy();
         let ad_duration: i32 = ranges
             .iter()
             .filter(|r| r.count > 1)
@@ -194,19 +194,22 @@ fn cmd_check() -> Result<()> {
     Ok(())
 }
 
-/// 按检测结果批量裁剪并输出到指定目录
-fn cut_files(mp3_files: &[PathBuf], result: &DetectionResult, output_dir: &Path) -> Result<()> {
-    let pb = progress_bar(mp3_files.len() as u64);
+/// 按检测结果批量裁剪并输出到指定目录（输出格式与源文件一致）
+fn cut_files(audio_files: &[PathBuf], result: &DetectionResult, output_dir: &Path) -> Result<()> {
+    let pb = progress_bar(audio_files.len() as u64);
     let mut failures: Vec<String> = Vec::new();
 
-    for (i, mp3_path) in mp3_files.iter().enumerate() {
-        let output_path = output_dir.join(mp3_path.file_name().unwrap());
-        if let Err(e) =
-            pipeline::cut_file(mp3_path, &output_path, &result.ranges[i], result.lengths[i])
-        {
+    for (i, audio_path) in audio_files.iter().enumerate() {
+        let output_path = output_dir.join(audio_path.file_name().unwrap());
+        if let Err(e) = pipeline::cut_file(
+            audio_path,
+            &output_path,
+            &result.ranges[i],
+            result.lengths[i],
+        ) {
             failures.push(format!(
                 "{}: {}",
-                mp3_path.file_name().unwrap().to_string_lossy(),
+                audio_path.file_name().unwrap().to_string_lossy(),
                 e
             ));
         }

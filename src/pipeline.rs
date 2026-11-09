@@ -9,17 +9,29 @@ use crate::audio::{cache, ffmpeg};
 use crate::core::detect::reverse_range;
 use crate::core::range::Range;
 
-/// 收集目录下的 MP3 文件（按路径排序，保证处理顺序稳定）
-pub fn collect_mp3_files(dir: &Path) -> Result<Vec<PathBuf>> {
+/// 支持的音频扩展名（ffmpeg 可解码的常见格式）
+pub const SUPPORTED_EXTENSIONS: &[&str] =
+    &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "wma"];
+
+/// 判断路径是否为支持的音频文件
+pub fn is_supported_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            SUPPORTED_EXTENSIONS
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(ext))
+        })
+        .unwrap_or(false)
+}
+
+/// 收集目录下的音频文件（按路径排序，保证处理顺序稳定）
+pub fn collect_audio_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("无法读取目录: {}", dir.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .map(|ext| ext.eq_ignore_ascii_case("mp3"))
-                .unwrap_or(false)
-        })
+        .filter(|path| is_supported_audio(path))
         .collect();
 
     files.sort();
@@ -54,7 +66,11 @@ pub fn overwrite_file(input: &Path, ad_ranges: &[Range], total_len: usize) -> Re
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = input.with_file_name(format!(".{}.{}.tmp.mp3", file_stem, std::process::id()));
+    let ext = input
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mp3".to_string());
+    let tmp = input.with_file_name(format!(".{}.{}.tmp.{}", file_stem, std::process::id(), ext));
 
     cut_file(input, &tmp, ad_ranges, total_len)?;
 

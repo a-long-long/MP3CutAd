@@ -21,7 +21,7 @@ pub mod cli;
 pub mod gui;
 
 // 重新导出主要接口
-pub use audio::ffmpeg::{cut_and_combine, mp3_to_wav};
+pub use audio::ffmpeg::{audio_to_wav, cut_and_combine};
 pub use core::detect::{detect_ad, reverse_range, DetectionResult};
 pub use core::range::Range;
-pub use pipeline::{collect_mp3_files, cut_file, keep_segments};
+pub use pipeline::{collect_audio_files, cut_file, is_supported_audio, keep_segments};
