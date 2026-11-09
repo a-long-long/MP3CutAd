@@ -28,15 +28,34 @@ mp3cutad-cli check
 
 ## 构建
 
+两个可执行目标都通过 Cargo feature 控制，**直接执行 `cargo build --release` 只会构建库和 DLL**，不会生成 CLI 与 GUI。
+
+### 方式一：Windows 一键脚本
+
+```bat
+build.bat
+```
+
+脚本依次构建库、CLI、GUI，并把产物复制到 `release\` 目录：
+
+- `release\MP3CutAd-RS.exe`（由 `mp3cutad-gui.exe` 复制而来）
+- `release\mp3cutad-cli.exe`
+- `release\mp3cutad_rs.dll`
+
+### 方式二：手动构建
+
 ```bash
+# 库 + C ABI 动态库
+cargo build --release --lib
+
 # CLI
 cargo build --release --features cli --bin mp3cutad-cli
 
 # GUI
 cargo build --release --features gui --bin mp3cutad-gui
 
-# C ABI 动态库（cdylib）
-cargo build --release --lib
+# 一次性构建 CLI 与 GUI
+cargo build --release --features cli,gui
 ```
 
 产物位于 `target/release/`：
@@ -44,8 +63,10 @@ cargo build --release --lib
 | 文件 | 说明 |
 |---|---|
 | `mp3cutad-cli.exe` | 命令行程序 |
-| `mp3cutad-gui.exe` | 图形界面程序（分发时的 `MP3CutAd-RS.exe` 为同一构建） |
+| `mp3cutad-gui.exe` | 图形界面程序 |
 | `mp3cutad_rs.dll` | C ABI 动态库 |
+
+分发时可将 `mp3cutad-gui.exe` 重命名为 `MP3CutAd-RS.exe`，或直接运行 `build.bat` 让它自动完成复制。三个文件均可单独拷出使用，但运行环境仍需安装 FFmpeg 并加入 `PATH`。
 
 ## 图形界面
 
