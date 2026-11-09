@@ -68,6 +68,37 @@ cargo build --release --features cli,gui
 
 分发时可将 `mp3cutad-gui.exe` 重命名为 `MP3CutAd-RS.exe`，或直接运行 `build.bat` 让它自动完成复制。三个文件均可单独拷出使用，但运行环境仍需安装 FFmpeg 并加入 `PATH`。
 
+### 开发与调试
+
+开发时使用 Debug 构建（不加 `--release`），编译更快，产物位于 `target/debug/`：
+
+```bash
+# 构建 CLI 与 GUI 的调试版本
+cargo build --features cli,gui
+
+# 直接运行（`--` 之后的参数传给程序本身）
+cargo run --features cli --bin mp3cutad-cli -- check
+cargo run --features cli --bin mp3cutad-cli -- detect a.mp3 b.mp3
+cargo run --features gui --bin mp3cutad-gui
+```
+
+常用检查命令：
+
+```bash
+cargo fmt                                              # 格式化
+cargo fmt --check                                      # 仅检查格式
+cargo check --all-targets --features cli,gui           # 类型检查（含测试目标）
+cargo clippy --all-targets --features cli,gui          # 静态检查
+cargo test --lib                                       # 运行全部单元测试
+cargo test --lib viterbi -- --nocapture                # 只跑匹配的测试并显示输出
+```
+
+GUI 通过 `env_logger` 初始化日志，需要排查问题时可打开调试日志：
+
+```powershell
+$env:RUST_LOG="debug"; cargo run --features gui --bin mp3cutad-gui
+```
+
 ## 图形界面
 
 直接运行 `mp3cutad-gui.exe`（或 `MP3CutAd-RS.exe`）：
@@ -203,14 +234,6 @@ src/
 ## 性能
 
 原项目基准测试环境（10 个 30 分钟音频）下，Rust 版相比 C# 版约有 2–4 倍速度提升，内存占用约为一半。实际耗时会随文件数量、时长和 CPU 核心数变化。
-
-## 开发
-
-```bash
-cargo fmt                                              # 格式化
-cargo check --all-targets --features cli,gui           # 类型检查
-cargo test --lib                                       # 单元测试
-```
 
 ## 许可证
 
