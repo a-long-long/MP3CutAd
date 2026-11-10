@@ -15,9 +15,9 @@ pub fn start_save(state: &SharedState) {
 }
 
 fn save_all(state: &SharedState) {
-    let (overwrite, files) = {
+    let (overwrite, files, thresholds) = {
         let s = state.lock().unwrap();
-        (s.overwrite_original, s.files.clone())
+        (s.overwrite_original, s.files.clone(), s.thresholds)
     };
 
     let output_dir = if overwrite {
@@ -35,7 +35,7 @@ fn save_all(state: &SharedState) {
     let targets: Vec<(usize, FileInfo)> = files
         .into_iter()
         .enumerate()
-        .filter(|(_, f)| f.detected && f.has_effective_ads())
+        .filter(|(_, f)| f.detected && f.has_effective_ads(thresholds))
         .collect();
 
     if targets.is_empty() {
@@ -60,7 +60,7 @@ fn save_all(state: &SharedState) {
             s.status_message = format!("[{}/{}] 处理: {}", done + 1, total, file.name);
         }
 
-        let ad_ranges: Vec<Range> = file.effective_ads().copied().collect();
+        let ad_ranges: Vec<Range> = file.effective_ads(thresholds).copied().collect();
 
         let result = if overwrite {
             pipeline::overwrite_file(&file.path, &ad_ranges, file.length)

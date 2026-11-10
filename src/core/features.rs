@@ -16,6 +16,8 @@ const N_FFT: usize = FFT_LEN;
 const N_MFCC: usize = 13;
 /// Mel 滤波器数量
 const N_MELS: usize = 26;
+/// Mel 频带数量（供界面可视化使用）
+pub const MEL_BANDS: usize = N_MELS;
 /// 色度特征 bin 数量（12 个音级）
 const N_CHROMA: usize = 12;
 
@@ -129,6 +131,29 @@ fn compute_mfcc_features(fft: &Array2<f64>) -> Array2<f64> {
     }
 
     mfcc
+}
+
+/// 计算对数 Mel 频谱
+///
+/// 与 MFCC 使用相同的滤波器组，返回 `(帧数, MEL_BANDS)` 的对数能量，
+/// 仅用于界面可视化，不参与广告匹配。
+pub fn mel_spectrogram(fft: &Array2<f64>) -> Array2<f64> {
+    let n_frames = fft.nrows();
+    let filterbank = mel_filterbank();
+    let mut mel = Array2::zeros((n_frames, N_MELS));
+
+    for frame in 0..n_frames {
+        let spectrum = fft.row(frame);
+        for m in 0..N_MELS {
+            let mut energy = 0.0f64;
+            for k in 0..spectrum.len().min(filterbank.ncols()) {
+                energy += spectrum[k].powi(2) * filterbank[[m, k]];
+            }
+            mel[[frame, m]] = (energy + 1e-10).ln();
+        }
+    }
+
+    mel
 }
 
 /// 计算 Chroma 色度特征
@@ -269,6 +294,14 @@ mod tests {
         let mfcc = compute_mfcc_features(&fft);
         assert_eq!(mfcc.nrows(), 100);
         assert_eq!(mfcc.ncols(), N_MFCC);
+    }
+
+    #[test]
+    fn test_mel_spectrogram_shape() {
+        let fft = Array2::zeros((100, FREQ_BINS));
+        let mel = mel_spectrogram(&fft);
+        assert_eq!(mel.nrows(), 100);
+        assert_eq!(mel.ncols(), MEL_BANDS);
     }
 
     #[test]

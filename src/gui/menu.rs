@@ -63,9 +63,10 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             let files_to_save = {
                 let s = state.lock().unwrap();
+                let th = s.thresholds;
                 s.files
                     .iter()
-                    .filter(|f| f.detected && f.has_effective_ads())
+                    .filter(|f| f.detected && f.has_effective_ads(th))
                     .count()
             };
 
@@ -89,6 +90,12 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
                 s.selected_ad = None;
                 s.ads_to_delete.clear();
                 s.status_message = "列表已清空".to_string();
+            }
+
+            let settings_open = state.lock().unwrap().show_settings;
+            if ui.selectable_label(settings_open, "阈值设置").clicked() {
+                let mut s = state.lock().unwrap();
+                s.show_settings = !settings_open;
             }
         });
     });
@@ -114,8 +121,13 @@ pub fn status_bar(ctx: &Context, state: &SharedState) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(format!("文件数: {}", s.files.len()));
                 ui.separator();
-                ui.label(format!("最小长度: {}秒", s.min_length));
-                ui.label(format!("最小次数: {}", s.min_count));
+                let min_len = if s.thresholds.min_length_sec > 0 {
+                    format!("最小长度: {}秒", s.thresholds.min_length_sec)
+                } else {
+                    "最小长度: 不限".to_string()
+                };
+                ui.label(min_len);
+                ui.label(format!("最小次数: {}", s.thresholds.min_count));
             });
         });
     });
@@ -223,10 +235,11 @@ fn start_detection(state: &SharedState) {
 fn select_all_ads(state: &SharedState) {
     let mut s = state.lock().unwrap();
     let mut selected = Vec::new();
+    let th = s.thresholds;
 
     for (file_idx, file) in s.files.iter().enumerate() {
         if file.detected {
-            for ad_idx in 0..file.effective_ad_count() {
+            for ad_idx in 0..file.effective_ad_count(th) {
                 selected.push((file_idx, ad_idx));
             }
         }
@@ -257,12 +270,13 @@ fn mark_selected_for_deletion(state: &SharedState) {
 
     s.ads_to_delete.clear();
 
+    let th = s.thresholds;
     let remaining: usize = s
         .files
         .iter()
         .filter(|f| f.detected)
         .map(|f| {
-            f.effective_ad_count()
+            f.effective_ad_count(th)
                 .saturating_sub(f.marked_for_deletion.len())
         })
         .sum();

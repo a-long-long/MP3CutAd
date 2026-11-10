@@ -9,6 +9,8 @@ mod menu;
 mod playback;
 mod results;
 mod save;
+mod settings;
+mod spectrogram;
 mod state;
 
 pub use app::run;

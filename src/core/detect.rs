@@ -407,16 +407,14 @@ fn fine_tune_multi(
             prev = check_pos;
         }
 
-        let r1 = create_range(
-            ranges1,
-            len1,
-            Range::new_simple((p1 as i64 + prev) as i32, (p1 + next) as i32),
-        );
-        let r2 = create_range(
-            ranges2,
-            len2,
-            Range::new_simple((p2 as i64 + prev) as i32, (p2 + next) as i32),
-        );
+        // 记录匹配度，供界面展示与结果文件保存
+        let mut add1 = Range::new_simple((p1 as i64 + prev) as i32, (p1 + next) as i32);
+        add1.score = best_sim;
+        let mut add2 = Range::new_simple((p2 as i64 + prev) as i32, (p2 + next) as i32);
+        add2.score = best_sim;
+
+        let r1 = create_range(ranges1, len1, add1);
+        let r2 = create_range(ranges2, len2, add2);
 
         if let (Some(r1), Some(r2)) = (r1, r2) {
             links.push(Link::new(file_idx1, file_idx2, r1, r2));
@@ -460,6 +458,7 @@ fn create_range(ranges: &mut Vec<Range>, len: usize, add: Range) -> Option<Range
         r.begin = r.begin.min(add.begin);
         r.end = r.end.max(add.end);
         r.count += add.count;
+        r.score = r.score.max(add.score);
     }
 
     if !cross {
@@ -493,6 +492,7 @@ fn compress_range(ranges: &[Range]) -> Vec<Range> {
                 existing.begin = existing.begin.min(r.begin);
                 existing.end = existing.end.max(r.end);
                 existing.count += r.count;
+                existing.score = existing.score.max(r.score);
                 merged = true;
                 break;
             }

@@ -9,6 +9,8 @@ pub struct Range {
     pub end: i32,
     pub count: i32,
     pub type_id: i32,
+    /// 匹配度（0.0 ~ 1.0），由检测阶段的相似度得分聚合而来
+    pub score: f64,
 }
 
 impl Range {
@@ -18,6 +20,7 @@ impl Range {
             end,
             count,
             type_id: -1,
+            score: 0.0,
         }
     }
 

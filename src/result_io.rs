@@ -6,8 +6,10 @@
 //! <文件路径>
 //! <总帧数>
 //! <区间数>
-//! <begin> <end> <count> <type_id>
+//! <begin> <end> <count> <type_id> [score]
 //! ```
+//!
+//! `score` 为匹配度，旧版结果文件没有该字段时按 0 处理。
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -38,7 +40,11 @@ pub fn save(result: &DetectionResult, files: &[PathBuf], output: &Path) -> Resul
         writeln!(writer, "{}", result.ranges[i].len())?;
 
         for r in &result.ranges[i] {
-            writeln!(writer, "{} {} {} {}", r.begin, r.end, r.count, r.type_id)?;
+            writeln!(
+                writer,
+                "{} {} {} {} {:.4}",
+                r.begin, r.end, r.count, r.type_id, r.score
+            )?;
         }
     }
 
@@ -86,6 +92,10 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
                 end: parts[1].parse().context("区间结束位置无效")?,
                 count: parts[2].parse().context("区间出现次数无效")?,
                 type_id: parts[3].parse().context("区间类型无效")?,
+                score: parts
+                    .get(4)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0),
             });
         }
 

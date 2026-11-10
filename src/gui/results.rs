@@ -5,6 +5,7 @@ use egui::{self, Context};
 use crate::core::detect::reverse_range;
 
 use super::playback;
+use super::spectrogram;
 use super::state::{FileInfo, SharedState};
 
 /// 音频条高度
@@ -15,7 +16,7 @@ const TICK_HEIGHT: f32 = 20.0;
 /// 检测结果面板
 pub fn show(ctx: &Context, state: &SharedState) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        let detected: Vec<(usize, FileInfo)> = {
+        let mut detected: Vec<(usize, FileInfo)> = {
             let s = state.lock().unwrap();
             s.files
                 .iter()
@@ -25,6 +26,19 @@ pub fn show(ctx: &Context, state: &SharedState) {
                 .collect()
         };
 
+        let (mut sort_by_score, thresholds) = {
+            let s = state.lock().unwrap();
+            (s.sort_by_score, s.thresholds)
+        };
+        if sort_by_score {
+            // 匹配度高的排在前面；未知匹配度（旧结果）排最后
+            detected.sort_by(|a, b| {
+                let sa = average_score(&a.1, thresholds).unwrap_or(-1.0);
+                let sb = average_score(&b.1, thresholds).unwrap_or(-1.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
         if detected.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.heading("检测完成后在此显示结果");
@@ -32,12 +46,37 @@ pub fn show(ctx: &Context, state: &SharedState) {
             return;
         }
 
-        let ads_total: usize = detected.iter().map(|(_, f)| f.effective_ad_count()).sum();
-        ui.heading(format!(
-            "检测结果 ({} 个文件, {} 个广告段)",
-            detected.len(),
-            ads_total
-        ));
+        let ads_total: usize = detected
+            .iter()
+            .map(|(_, f)| f.effective_ad_count(thresholds))
+            .sum();
+        ui.horizontal(|ui| {
+            ui.heading(format!(
+                "检测结果 ({} 个文件, {} 个广告段)",
+                detected.len(),
+                ads_total
+            ));
+
+            let mut show_spectrogram = state.lock().unwrap().show_spectrogram;
+            if ui
+                .checkbox(&mut show_spectrogram, "频谱")
+                .on_hover_text("选中文件后显示能量包络与 Mel 频谱")
+                .changed()
+            {
+                state.lock().unwrap().show_spectrogram = show_spectrogram;
+            }
+
+            if ui
+                .checkbox(&mut sort_by_score, "按匹配度排序")
+                .on_hover_text("匹配度高的文件排在前面，未知匹配度排最后")
+                .changed()
+            {
+                state.lock().unwrap().sort_by_score = sort_by_score;
+            }
+
+            ui.separator();
+            confidence_legend(ui, thresholds);
+        });
         ui.separator();
 
         // 滚动条改为非悬浮并收窄：悬浮滚动条会覆盖在音频条右端，
@@ -50,7 +89,7 @@ pub fn show(ctx: &Context, state: &SharedState) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             let colors = ad_colors();
             for (file_idx, file) in &detected {
-                draw_file_track(ui, ctx, state, *file_idx, file, &colors);
+                draw_file_track(ui, ctx, state, *file_idx, file, &colors, thresholds);
             }
         });
     });
@@ -64,24 +103,34 @@ fn draw_file_track(
     file_idx: usize,
     file: &FileInfo,
     colors: &[egui::Color32],
+    thresholds: crate::gui::state::Thresholds,
 ) {
     let file_len = file.length as f32;
-    let remaining_segments = reverse_range(&file.ad_ranges, file.length);
+    let effective_ads: Vec<&crate::core::range::Range> =
+        file.effective_ads(thresholds).collect();
+    // 剩余时长按实际会被裁剪的段计算，与保存结果保持一致
+    let effective_owned: Vec<crate::core::range::Range> =
+        effective_ads.iter().map(|r| **r).collect();
+    let remaining_segments = reverse_range(&effective_owned, file.length);
     let remaining_duration: f64 = remaining_segments
         .iter()
         .map(|r| (r.end - r.begin) as f64 / 10.0)
         .sum();
-    let effective_ads: Vec<&crate::core::range::Range> = file.effective_ads().collect();
+    let avg_score = average_score(file, thresholds);
 
     ui.horizontal(|ui| {
         ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "✓");
         ui.strong(&file.name);
-        ui.label(format!(
+        let mut summary = format!(
             "  原始: {:.1}s | 剩余: {:.1}s | 删除 {} 个广告段",
             file.length as f64 / 10.0,
             remaining_duration,
             effective_ads.len()
-        ));
+        );
+        if let Some(score) = avg_score {
+            summary.push_str(&format!(" | 平均匹配度: {:.0}%", score * 100.0));
+        }
+        ui.label(summary);
     });
 
     ui.add_space(2.0);
@@ -121,7 +170,8 @@ fn draw_file_track(
                 x0.max(bar_rect.left())..=x1.min(bar_rect.right()),
                 bar_rect.top() + 2.0..=bar_rect.bottom() - 2.0,
             );
-            let color = colors[(ai + file_idx) % colors.len()];
+            let color =
+                confidence_color(ad.score, colors[(ai + file_idx) % colors.len()], thresholds);
 
             // 正在播放的段更亮，其他段半透明
             let alpha = if is_this_file_playing && playing_ad_idx == Some(ai) {
@@ -155,10 +205,19 @@ fn draw_file_track(
                 );
             }
 
-            // 在段内显示时间
+            // 在段内显示时间与匹配度
             let seg_width = x1 - x0;
-            if seg_width > 40.0 {
-                let label = format!("{:.0}-{:.0}s", ad.begin as f64 / 10.0, ad.end as f64 / 10.0);
+            if seg_width > 50.0 {
+                let label = if ad.score > 0.0 {
+                    format!(
+                        "{:.0}-{:.0}s {:.0}%",
+                        ad.begin as f64 / 10.0,
+                        ad.end as f64 / 10.0,
+                        ad.score * 100.0
+                    )
+                } else {
+                    format!("{:.0}-{:.0}s", ad.begin as f64 / 10.0, ad.end as f64 / 10.0)
+                };
                 painter.text(
                     egui::pos2((x0 + x1) / 2.0, bar_rect.center().y),
                     egui::Align2::CENTER_CENTER,
@@ -183,6 +242,15 @@ fn draw_file_track(
     }
 
     draw_time_ticks(ui, file_len as f64 / 10.0);
+
+    // 仅对选中的文件展示频谱，避免同时渲染多张纹理
+    let (is_selected, show_spectrogram) = {
+        let s = state.lock().unwrap();
+        (s.selected_file == Some(file_idx), s.show_spectrogram)
+    };
+    if is_selected && show_spectrogram {
+        spectrogram::show(ui, state, file_idx, file);
+    }
 
     ui.add_space(8.0);
     ui.separator();
@@ -209,12 +277,13 @@ fn handle_track_click(
         (click_pos.x >= x0 && click_pos.x <= x1).then_some(ai)
     });
 
+    // 点击任意位置都同步选中文件，便于查看该文件的频谱
+    state.lock().unwrap().selected_file = Some(file_idx);
+
     match clicked_ad {
         Some(ai) if ctx.input(|i| i.modifiers.ctrl) => toggle_selection(state, file_idx, ai),
         Some(ai) => playback::toggle_ad_playback(state, file_idx, ai),
-        None => {
-            state.lock().unwrap().selected_file = Some(file_idx);
-        }
+        None => {}
     }
 }
 
@@ -263,7 +332,7 @@ fn draw_time_ticks(ui: &mut egui::Ui, original_duration: f64) {
     }
 }
 
-/// 广告段配色方案
+/// 广告段配色方案（匹配度未知时使用，例如旧版结果文件）
 fn ad_colors() -> Vec<egui::Color32> {
     vec![
         egui::Color32::from_rgb(200, 80, 80),
@@ -273,4 +342,71 @@ fn ad_colors() -> Vec<egui::Color32> {
         egui::Color32::from_rgb(180, 100, 200),
         egui::Color32::from_rgb(200, 120, 60),
     ]
+}
+
+/// 有效广告段的平均匹配度；没有可用匹配度时返回 None
+fn average_score(file: &FileInfo, thresholds: crate::gui::state::Thresholds) -> Option<f64> {
+    let scored: Vec<f64> = file
+        .effective_ads(thresholds)
+        .filter(|r| r.score > 0.0)
+        .map(|r| r.score)
+        .collect();
+    if scored.is_empty() {
+        None
+    } else {
+        Some(scored.iter().sum::<f64>() / scored.len() as f64)
+    }
+}
+
+/// 按匹配度着色：高=红，中=橙，低=黄；未知（0）沿用原配色
+fn confidence_color(
+    score: f64,
+    fallback: egui::Color32,
+    thresholds: crate::gui::state::Thresholds,
+) -> egui::Color32 {
+    if score <= 0.0 {
+        fallback
+    } else if score >= thresholds.score_high {
+        egui::Color32::from_rgb(200, 80, 80)
+    } else if score >= thresholds.score_low {
+        egui::Color32::from_rgb(226, 146, 60)
+    } else {
+        egui::Color32::from_rgb(198, 188, 66)
+    }
+}
+
+/// 匹配度配色图例（随阈值设置变化）
+fn confidence_legend(ui: &mut egui::Ui, thresholds: crate::gui::state::Thresholds) {
+    let high = thresholds.score_high;
+    let low = thresholds.score_low;
+    let items = [
+        (
+            format!("≥{:.0}%", high * 100.0),
+            confidence_color(high, egui::Color32::WHITE, thresholds),
+        ),
+        (
+            format!(
+                "{:.0}-{:.0}%",
+                low * 100.0,
+                high * 100.0
+            ),
+            confidence_color((low + high) / 2.0, egui::Color32::WHITE, thresholds),
+        ),
+        (
+            format!("<{:.0}%", low * 100.0),
+            confidence_color(low * 0.5, egui::Color32::WHITE, thresholds),
+        ),
+    ];
+    for (text, color) in items {
+        ui.label(
+            egui::RichText::new(format!("● {text}"))
+                .small()
+                .color(color),
+        );
+    }
+    ui.label(
+        egui::RichText::new("匹配度")
+            .small()
+            .color(egui::Color32::from_gray(150)),
+    );
 }

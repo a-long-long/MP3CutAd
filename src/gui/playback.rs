@@ -66,7 +66,7 @@ pub fn toggle_ad_playback(state: &SharedState, file_idx: usize, ad_idx: usize) {
         let Some(file) = s.files.get(file_idx) else {
             return;
         };
-        let Some(ad) = file.effective_ads().nth(ad_idx) else {
+        let Some(ad) = file.effective_ads(s.thresholds).nth(ad_idx) else {
             return;
         };
 
