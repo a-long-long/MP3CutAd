@@ -37,6 +37,14 @@ const FINE_TUNE_WINDOW: usize = 4;
 const POSITION_SEARCH_RANGE: usize = 5;
 /// 边界收紧阈值：高于此值才保留
 const BOUNDARY_TIGHTEN_THRESHOLD: f64 = 0.75;
+/// 块级置信度：每块的帧数（10 帧 = 1 秒）
+const CONFIDENCE_BLOCK: usize = 10;
+/// 边界精修窗口（帧）
+const BOUNDARY_REFINE_WINDOW: usize = 2;
+/// 边界精修阈值：低于此值则继续向内收缩
+const BOUNDARY_REFINE_THRESHOLD: f64 = 0.80;
+/// 边界精修时单侧最多收缩的帧数
+const BOUNDARY_REFINE_MAX_SHIFT: usize = 5;
 /// 多特征融合权重：[FFT, MFCC, Chroma]
 const FEATURE_WEIGHTS: [f64; 3] = [0.50, 0.30, 0.20];
 
@@ -408,10 +416,21 @@ fn fine_tune_multi(
         }
 
         // 记录匹配度，供界面展示与结果文件保存
-        let mut add1 = Range::new_simple((p1 as i64 + prev) as i32, (p1 + next) as i32);
-        add1.score = best_sim;
-        let mut add2 = Range::new_simple((p2 as i64 + prev) as i32, (p2 + next) as i32);
-        add2.score = best_sim;
+        let start = (p1 as i64 + prev).max(0) as usize;
+        let end = (p1 + next).min(len1);
+        let (start, end) = refine_boundaries(feat1, feat2, p1, p2, start, end);
+        if end <= start {
+            continue;
+        }
+
+        // 第二个文件中与 start 对齐的位置
+        let q2 = (p2 as i64 + start as i64 - p1 as i64) as usize;
+        let score = block_confidence(feat1, feat2, start, q2, end - start);
+
+        let mut add1 = Range::new_simple(start as i32, end as i32);
+        add1.score = score;
+        let mut add2 = Range::new_simple(q2 as i32, (q2 + (end - start)) as i32);
+        add2.score = score;
 
         let r1 = create_range(ranges1, len1, add1);
         let r2 = create_range(ranges2, len2, add2);
@@ -422,6 +441,115 @@ fn fine_tune_multi(
     }
 
     links
+}
+
+/// 逐帧精修区间边界：两侧各自向内收缩，最多 `BOUNDARY_REFINE_MAX_SHIFT` 帧
+fn refine_boundaries(
+    feat1: &AudioFeatures,
+    feat2: &AudioFeatures,
+    p1: usize,
+    p2: usize,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
+    let len1 = feat1.fft.nrows();
+    let len2 = feat2.fft.nrows();
+    let (mut s, mut e) = (start, end);
+
+    for _ in 0..BOUNDARY_REFINE_MAX_SHIFT {
+        if e.saturating_sub(s) <= 2 {
+            break;
+        }
+        if p1 + s + BOUNDARY_REFINE_WINDOW > len1 || p2 + s + BOUNDARY_REFINE_WINDOW > len2 {
+            break;
+        }
+        let sim = features::multi_feature_sim(
+            feat1,
+            feat2,
+            p1 + s,
+            p2 + s,
+            BOUNDARY_REFINE_WINDOW,
+            &FEATURE_WEIGHTS,
+        );
+        if sim >= BOUNDARY_REFINE_THRESHOLD {
+            break;
+        }
+        s += 1;
+    }
+
+    for _ in 0..BOUNDARY_REFINE_MAX_SHIFT {
+        if e.saturating_sub(s) <= 2 {
+            break;
+        }
+        let pos = e - 1;
+        if p1 + pos + BOUNDARY_REFINE_WINDOW > len1
+            || p2 + pos + BOUNDARY_REFINE_WINDOW > len2
+        {
+            e -= 1;
+            continue;
+        }
+        let sim = features::multi_feature_sim(
+            feat1,
+            feat2,
+            p1 + pos,
+            p2 + pos,
+            BOUNDARY_REFINE_WINDOW,
+            &FEATURE_WEIGHTS,
+        );
+        if sim >= BOUNDARY_REFINE_THRESHOLD {
+            break;
+        }
+        e -= 1;
+    }
+
+    (s, e)
+}
+
+/// 块级置信度：按 1 秒分块统计，未达阈值的块按 0 计
+///
+/// 相比"区间内最高的一帧相似度"，该值反映整段有多大比例、有多像，
+/// 避免局部强匹配掩盖中间断裂。
+fn block_confidence(
+    feat1: &AudioFeatures,
+    feat2: &AudioFeatures,
+    start: usize,
+    q2: usize,
+    len: usize,
+) -> f64 {
+    if len == 0 {
+        return 0.0;
+    }
+
+    let len1 = feat1.fft.nrows();
+    let len2 = feat2.fft.nrows();
+    let mut matched = 0.0;
+    let mut blocks = 0usize;
+    let mut offset = 0usize;
+
+    while offset < len {
+        let window = FINE_TUNE_WINDOW.min(len - offset).max(1);
+        if start + offset + window <= len1 && q2 + offset + window <= len2 {
+            let sim = features::multi_feature_sim(
+                feat1,
+                feat2,
+                start + offset,
+                q2 + offset,
+                window,
+                &FEATURE_WEIGHTS,
+            );
+            if sim >= FINE_TUNE_THRESHOLD {
+                matched += sim;
+            }
+        }
+        blocks += 1;
+        offset += CONFIDENCE_BLOCK;
+    }
+
+    if blocks == 0 {
+        0.0
+    } else {
+        matched / blocks as f64
+    }
 }
 
 /// 检查点是否在任何区间内
