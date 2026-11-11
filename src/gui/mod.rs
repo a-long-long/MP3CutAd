@@ -12,5 +12,6 @@ mod save;
 mod settings;
 mod spectrogram;
 mod state;
+mod train;
 
 pub use app::run;

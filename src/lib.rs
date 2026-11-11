@@ -5,6 +5,7 @@
 //! - [`audio`]: FFmpeg 调用与检测缓存
 //! - [`pipeline`]: 检测到裁剪的高层编排
 //! - [`result_io`]: 检测结果文件读写
+//! - [`training`]: 事件分类模型训练
 //! - [`ffi`]: C ABI 接口
 //! - [`cli`] / [`gui`]: 需要对应 feature 的界面层
 
@@ -13,6 +14,7 @@ pub mod core;
 pub mod ffi;
 pub mod pipeline;
 pub mod result_io;
+pub mod training;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -22,8 +24,8 @@ pub mod gui;
 
 // 重新导出主要接口
 pub use audio::ffmpeg::{audio_to_wav, cut_and_combine};
+pub use core::classify::{ClassifyOptions, EventRange};
 pub use core::detect::{detect_ad, reverse_range, DetectionResult};
-pub use core::range::Range;
-pub use core::classify::{EventRange, ClassifyOptions};
 pub use core::model::ModelFile;
+pub use core::range::Range;
 pub use pipeline::{collect_audio_files, cut_file, is_supported_audio, keep_segments};

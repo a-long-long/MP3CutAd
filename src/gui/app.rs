@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::state::SharedState;
-use super::{file_list, fonts, menu, results, settings};
+use super::{file_list, fonts, menu, results, settings, train};
 
 /// 主应用
 struct Mp3CutAdApp {
@@ -25,6 +25,7 @@ impl eframe::App for Mp3CutAdApp {
         file_list::show(ctx, &self.state);
         results::show(ctx, &self.state);
         settings::show(ctx, &self.state);
+        train::show(ctx, &self.state);
 
         // 处理中或播放中时持续重绘
         let needs_repaint = {

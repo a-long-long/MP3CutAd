@@ -2,6 +2,7 @@
 
 use crate::core::classify::EventRange;
 use crate::core::range::Range;
+use crate::training::TrainSample;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -139,6 +140,22 @@ pub struct AppState {
     pub classify_confidence: f64,
     /// 是否启用 HPSS 源分离（打击乐轨道检测广告段）
     pub enable_hpss: bool,
+    /// 训练样本列表
+    pub train_samples: Vec<TrainSample>,
+    /// 是否显示训练窗口
+    pub show_train: bool,
+    /// 新增样本使用的标签
+    pub train_label: String,
+    /// 随机森林树数量
+    pub train_trees: usize,
+    /// 单棵树最大深度
+    pub train_max_depth: usize,
+    /// 测试集比例
+    pub train_test_split: f64,
+    /// 导出广告段时选中的区间序号
+    pub train_export_index: usize,
+    /// 最近一次训练的结果摘要
+    pub train_report: Option<String>,
 }
 
 impl Default for AppState {
@@ -161,6 +178,14 @@ impl Default for AppState {
             model_path: None,
             classify_confidence: 0.55,
             enable_hpss: false,
+            train_samples: Vec::new(),
+            show_train: false,
+            train_label: "广告".to_string(),
+            train_trees: 100,
+            train_max_depth: 32,
+            train_test_split: 0.2,
+            train_export_index: 0,
+            train_report: None,
         }
     }
 }

@@ -52,7 +52,10 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
             let model_label = {
                 let s = state.lock().unwrap();
                 match &s.model_path {
-                    Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "模型已加载".to_string()),
+                    Some(p) => p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "模型已加载".to_string()),
                     None => "未选择模型".to_string(),
                 }
             };
@@ -66,6 +69,11 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
             };
             if ui.button("🎯 分类事件").clicked() && can_classify {
                 start_classification(state);
+            }
+
+            if ui.button("🏋 训练模型").clicked() {
+                let mut s = state.lock().unwrap();
+                s.show_train = !s.show_train;
             }
 
             ui.separator();
@@ -233,7 +241,11 @@ fn start_detection(state: &SharedState) {
             )
         };
 
-        let opts = if enable_hpss { DetectOptions::default().with_hpss() } else { DetectOptions::default() };
+        let opts = if enable_hpss {
+            DetectOptions::default().with_hpss()
+        } else {
+            DetectOptions::default()
+        };
 
         // 进度回调：实时更新进度条与状态文本（可能来自并行线程）
         let progress_state = state.clone();
@@ -356,7 +368,10 @@ fn start_classification(state: &SharedState) {
     // 先拿到必要参数，避免锁跨线程
     let (model_path, files): (Option<PathBuf>, Vec<PathBuf>) = {
         let s = state.lock().unwrap();
-        (s.model_path.clone(), s.files.iter().map(|f| f.path.clone()).collect())
+        (
+            s.model_path.clone(),
+            s.files.iter().map(|f| f.path.clone()).collect(),
+        )
     };
     let Some(mp) = model_path else { return };
 
@@ -404,12 +419,21 @@ fn start_classification(state: &SharedState) {
             };
 
             let events = match crate::core::classify::classify_file_with_progress(
-                path, &model, &opts, on_progress,
+                path,
+                &model,
+                &opts,
+                on_progress,
             ) {
                 Ok((ev, _nf)) => ev,
                 Err(e) => {
                     if let Ok(mut s) = state.lock() {
-                        s.status_message = format!("分类失败 {}: {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), e);
+                        s.status_message = format!(
+                            "分类失败 {}: {}",
+                            path.file_name()
+                                .map(|n| n.to_string_lossy())
+                                .unwrap_or_default(),
+                            e
+                        );
                     }
                     Vec::new()
                 }

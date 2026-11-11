@@ -3,15 +3,13 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::audio::ffmpeg;
 use crate::core::classify::{classify_file_with_progress, ClassifyOptions};
 use crate::core::detect::{detect_ad_with_progress, DetectOptions, DetectionResult};
-use crate::core::forest::{Forest, ForestParams};
-use crate::core::model::{load_model, save_model, ModelFile};
-use crate::core::segfeat::extract_segment_features;
+use crate::core::model::load_model;
+use crate::training::{TrainConfig, TrainSample};
 use crate::{pipeline, result_io};
 
 #[derive(Parser)]
@@ -105,7 +103,11 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Detect { files, output, hpss } => cmd_detect(&files, output.as_ref(), hpss),
+        Commands::Detect {
+            files,
+            output,
+            hpss,
+        } => cmd_detect(&files, output.as_ref(), hpss),
         Commands::Cut {
             input_dir,
             output_dir,
@@ -116,19 +118,30 @@ pub fn run() -> Result<()> {
             output_dir,
         } => cmd_auto(&input_dir, &output_dir),
         Commands::Check => cmd_check(),
-        Commands::Train { data_list, output, trees, max_depth, test_split, seed } => {
-            cmd_train(&data_list, &output, trees, max_depth, test_split, seed)
-        }
-        Commands::Classify { files, model, window, hop, confidence } => {
-            cmd_classify(&files, &model, window, hop, confidence)
-        }
+        Commands::Train {
+            data_list,
+            output,
+            trees,
+            max_depth,
+            test_split,
+            seed,
+        } => cmd_train(&data_list, &output, trees, max_depth, test_split, seed),
+        Commands::Classify {
+            files,
+            model,
+            window,
+            hop,
+            confidence,
+        } => cmd_classify(&files, &model, window, hop, confidence),
     }
 }
 
 fn cmd_detect(files: &[PathBuf], output: Option<&PathBuf>, hpss: bool) -> Result<()> {
     println!("开始检测广告...");
     println!("输入文件数量: {}", files.len());
-    if hpss { println!("HPSS 分离: 开启"); }
+    if hpss {
+        println!("HPSS 分离: 开启");
+    }
 
     for f in files {
         if !f.exists() {
@@ -136,7 +149,11 @@ fn cmd_detect(files: &[PathBuf], output: Option<&PathBuf>, hpss: bool) -> Result
         }
     }
 
-    let opts = if hpss { DetectOptions::default().with_hpss() } else { DetectOptions::default() };
+    let opts = if hpss {
+        DetectOptions::default().with_hpss()
+    } else {
+        DetectOptions::default()
+    };
     let result = detect_ad_with_progress(files, opts, |p, msg| {
         let bar = ProgressBar::new((p * 100.0) as u64);
         bar.set_style(ProgressStyle::default_bar());
@@ -245,137 +262,99 @@ fn cmd_check() -> Result<()> {
     Ok(())
 }
 
-fn cmd_train(data_list: &Path, output: &Path, trees: usize, max_depth: usize, test_split: f64, seed: u64) -> Result<()> {
-    use crate::audio::cache;
-    use ndarray::Array2;
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
-    use rayon::prelude::*;
-
+fn cmd_train(
+    data_list: &Path,
+    output: &Path,
+    trees: usize,
+    max_depth: usize,
+    test_split: f64,
+    seed: u64,
+) -> Result<()> {
     let list_dir = data_list.parent().unwrap_or(Path::new("."));
     let content = std::fs::read_to_string(data_list)?;
-    let mut entries: Vec<(PathBuf, String)> = Vec::new();
+    let mut samples: Vec<TrainSample> = Vec::new();
+
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
-        let Some((path_str, label)) = line.rsplit_once(char::is_whitespace) else { bail!("无法解析数据行: {}", line); };
+        if line.is_empty() {
+            continue;
+        }
+        let Some((path_str, label)) = line.rsplit_once(char::is_whitespace) else {
+            bail!("无法解析数据行: {}", line);
+        };
         let path = PathBuf::from(path_str);
-        let path = if path.is_absolute() { path } else { list_dir.join(path) };
-        entries.push((path, label.to_string()));
-    }
-    let mut samples: Vec<(PathBuf, String, usize, usize)> = Vec::new();
-    for (path, label) in entries {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            list_dir.join(path)
+        };
         if label.contains('到') {
             let parts: Vec<&str> = label.split('到').collect();
-            let total = parts.len();
-            for (i, p) in parts.iter().enumerate() { samples.push((path.clone(), p.trim().to_string(), i, total)); }
+            for (i, part) in parts.iter().enumerate() {
+                samples.push(TrainSample {
+                    path: path.clone(),
+                    label: part.trim().to_string(),
+                    split: Some((i, parts.len())),
+                });
+            }
         } else {
-            samples.push((path, label, 0, 1));
+            samples.push(TrainSample::whole(path, label));
         }
     }
-    let mut labels: Vec<String> = samples.iter().map(|(_, l, _, _)| l.clone()).collect();
-    labels.sort(); labels.dedup();
-    let label_to_idx: HashMap<String, usize> = labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect();
+
+    let mut labels: Vec<String> = samples.iter().map(|s| s.label.clone()).collect();
+    labels.sort();
+    labels.dedup();
+
     println!("训练随机森林事件分类模型...");
     println!("样本: {}, 标签: {:?}", samples.len(), labels);
 
-    let decoded: Vec<(Vec<f64>, String)> = samples.par_iter().map(|(path, label, seg_idx, total_segs)| {
-        let is_wav = path.extension().map(|e| e.eq_ignore_ascii_case("wav")).unwrap_or(false);
-        let raw = if is_wav { crate::core::fft::read_wav_samples(path)? } else {
-            let wp = cache::wav_path(path);
-            if !cache::is_fresh(path, &wp) { ffmpeg::audio_to_wav(path, &wp)?; }
-            crate::core::fft::read_wav_samples(&wp)?
-        };
-        let sl = raw.len() / (*total_segs).max(1);
-        let st = seg_idx * sl;
-        let en = if seg_idx + 1 == *total_segs { raw.len() } else { (seg_idx + 1) * sl };
-        Ok((raw[st..en].to_vec(), label.clone()))
-    }).collect::<Result<Vec<_>>>()?;
-    let ws = 44100; let hs = 22050;
-    let mut expanded: Vec<(&[f64], usize)> = Vec::new();
-    for (raw, label) in &decoded {
-        let lbl = label_to_idx[label];
-        if raw.len() < ws { continue; }
-        let n_windows = (raw.len() - ws) / hs + 1;
-        for j in 0..n_windows {
-            expanded.push((&raw[j * hs..j * hs + ws], lbl));
-        }
-    }
-    println!("窗口扩展后样本: {}", expanded.len());
-    let features: Vec<(Vec<f64>, usize)> = expanded.par_iter().map(|(seg, lbl)| {
-        let feat = extract_segment_features(seg)?; Ok((feat.to_vec(), *lbl))
-    }).collect::<Result<Vec<_>>>()?;
+    let config = TrainConfig {
+        n_trees: trees,
+        max_depth,
+        test_split,
+        seed,
+        ..Default::default()
+    };
+    let report = crate::training::train_model(&samples, &config, output, |_, _| {})?;
 
-    if features.is_empty() { bail!("没有可用的训练数据"); }
-    let n_samples = features.len();
-    let dim = features[0].0.len();
-    let mut x = Array2::zeros((n_samples, dim));
-    let mut y = vec![0usize; n_samples];
-    for (i, (feat, lbl)) in features.iter().enumerate() {
-        for j in 0..dim { x[[i, j]] = feat[j]; }
-        y[i] = *lbl;
-    }
-    let mut mean = vec![0.0f64; dim];
-    let mut std = vec![0.0f64; dim];
-    for j in 0..dim {
-        let s: f64 = (0..n_samples).map(|i| x[[i, j]]).sum();
-        mean[j] = s / n_samples as f64;
-    }
-    for j in 0..dim {
-        let s: f64 = (0..n_samples).map(|i| (x[[i, j]] - mean[j]).powi(2)).sum();
-        std[j] = (s / n_samples as f64).sqrt().max(1e-12);
-    }
-    for i in 0..n_samples { for j in 0..dim { x[[i, j]] = (x[[i, j]] - mean[j]) / std[j]; } }
-
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut indices: Vec<usize> = (0..n_samples).collect();
-    indices.shuffle(&mut rng);
-    let n_test = (n_samples as f64 * test_split) as usize;
-    let test_set: std::collections::HashSet<usize> = indices.iter().take(n_test).copied().collect();
-    let train_idx: Vec<usize> = indices.iter().skip(n_test).copied().collect();
-    let train_x = x.select(ndarray::Axis(0), &train_idx);
-    let train_y: Vec<usize> = train_idx.iter().map(|&i| y[i]).collect();
-
-    let params = ForestParams { n_trees: trees, max_depth, ..Default::default() };
-    let forest = Forest::train(&train_x, &train_y, &params, seed);
-
+    println!("窗口扩展后样本: {}", report.samples);
     println!("\n测试集评估:");
     println!("{:<10} {:>8} {:>8} {:>8}", "标签", "精确率", "召回率", "F1");
-    for (lbl_idx, label) in labels.iter().enumerate() {
-        let mut tp = 0usize; let mut fp = 0usize; let mut fn_ = 0usize;
-        for &i in &indices {
-            if !test_set.contains(&i) { continue; }
-            let feat: Vec<f64> = (0..dim).map(|j| x[[i, j]]).collect();
-            let (pred, _) = forest.predict(&feat);
-            let actual = y[i];
-            if pred == lbl_idx && actual == lbl_idx { tp += 1; }
-            else if pred == lbl_idx && actual != lbl_idx { fp += 1; }
-            else if pred != lbl_idx && actual == lbl_idx { fn_ += 1; }
-        }
-        let prec = if tp + fp > 0 { tp as f64 / (tp + fp) as f64 } else { 0.0 };
-        let rec = if tp + fn_ > 0 { tp as f64 / (tp + fn_) as f64 } else { 0.0 };
-        let f1 = if prec + rec > 0.0 { 2.0 * prec * rec / (prec + rec) } else { 0.0 };
-        println!("{:<10} {:>8.2} {:>8.2} {:>8.2}", label, prec, rec, f1);
+    for m in &report.metrics {
+        println!(
+            "{:<10} {:>8.2} {:>8.2} {:>8.2}",
+            m.label, m.precision, m.recall, m.f1
+        );
     }
 
-    let model = ModelFile {
-        version: crate::core::model::MODEL_VERSION,
-        feature_dim: dim, labels, scaler_mean: mean, scaler_std: std,
-        window_sec: 2.0, hop_sec: 1.0, forest,
-    };
-    save_model(&model, output)?;
     println!("\n模型已保存到: {}", output.display());
     Ok(())
 }
 
-fn cmd_classify(files: &[PathBuf], model_path: &Path, window: Option<f64>, hop: Option<f64>, confidence: Option<f64>) -> Result<()> {
+fn cmd_classify(
+    files: &[PathBuf],
+    model_path: &Path,
+    window: Option<f64>,
+    hop: Option<f64>,
+    confidence: Option<f64>,
+) -> Result<()> {
     let mut model = load_model(model_path)?;
-    if let Some(w) = window { model.window_sec = w; }
-    if let Some(h) = hop { model.hop_sec = h; }
-    let opts = ClassifyOptions { confidence_threshold: confidence.unwrap_or(0.55), ..Default::default() };
+    if let Some(w) = window {
+        model.window_sec = w;
+    }
+    if let Some(h) = hop {
+        model.hop_sec = h;
+    }
+    let opts = ClassifyOptions {
+        confidence_threshold: confidence.unwrap_or(0.55),
+        ..Default::default()
+    };
     println!("使用模型: {}", model_path.display());
     for f in files {
-        if !f.exists() { bail!("文件不存在: {}", f.display()); }
+        if !f.exists() {
+            bail!("文件不存在: {}", f.display());
+        }
         let name = f.file_name().unwrap().to_string_lossy();
         println!("\n文件: {}", name);
         let (events, n_frames) = classify_file_with_progress(f, &model, &opts, |_, _| {})?;
@@ -384,7 +363,13 @@ fn cmd_classify(files: &[PathBuf], model_path: &Path, window: Option<f64>, hop: 
             println!("  未检测到事件");
         } else {
             for e in &events {
-                println!("  {:.1}s - {:.1}s  {}  ({:.1}%)", e.begin as f64 / 10.0, e.end as f64 / 10.0, e.label, e.confidence * 100.0);
+                println!(
+                    "  {:.1}s - {:.1}s  {}  ({:.1}%)",
+                    e.begin as f64 / 10.0,
+                    e.end as f64 / 10.0,
+                    e.label,
+                    e.confidence * 100.0
+                );
             }
         }
     }
