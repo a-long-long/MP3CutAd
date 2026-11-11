@@ -17,6 +17,9 @@
 - **精确检测**：FFT 频谱分析 + LSH 局部敏感哈希 + 多特征融合 + Viterbi 时序过滤
 - **边界精修**：区间两端逐帧收紧（最多 5 帧），减少误切与漏切
 - **块级置信度**：按 1 秒分块统计匹配比例，避免局部强匹配掩盖区间中间的断裂
+- **HPSS 源分离（可选）**：谐波-打击乐分离后只对打击乐轨道检测，削弱背景音乐干扰
+- **事件分类**：可用命令行训练随机森林模型，对音频按时间打标签（如纯音 / 噪声），结果在时间轴下方单独轨道展示
+- **完整的使用文档**：图形界面逐项说明见 [docs/gui-usage.md](docs/gui-usage.md)
 
 ## 前置要求
 
@@ -108,8 +111,8 @@ $env:RUST_LOG="debug"; cargo run --features gui --bin mp3cutad-gui
 直接运行 `mp3cutad-gui.exe`（或 `MP3CutAd-RS.exe`）：
 
 1. **添加文件 / 添加目录**：支持上述 8 种音频格式
-2. **检测广告**：状态栏显示实时进度（预处理音频 i/N、比对音频片段 i/M）
-3. **查看结果**：每个文件一条时间轴，按原始时长绘制，广告段以色块标注
+2. **检测广告**：状态栏显示实时进度（预处理音频 i/N、比对音频片段 i/M）；勾选「HPSS 分离」会在预处理阶段先做谐波-打击乐分离，只对打击乐轨道检测，适合广告段混有背景音乐的素材
+3. **查看结果**：每个文件一条时间轴，按原始时长绘制，广告段以色块标注；运行过事件分类时，时间轴下方还会显示事件标签轨道
 4. **试听**：点击色块播放该广告段，再次点击停止
 5. **多选**：`Ctrl + 点击` 可多选广告段（黄色边框）
 6. **保存**：可输出到目录或勾选“覆盖原文件”；覆盖时先裁剪到临时文件，成功后才替换原文件
@@ -144,12 +147,28 @@ $env:RUST_LOG="debug"; cargo run --features gui --bin mp3cutad-gui
 
    修改立即生效（清空旧的选择以避免序号错位），可一键「恢复默认」；当前阈值会显示在底部状态栏。
 
+11. **HPSS 分离**：工具栏勾选后，检测前先做谐波-打击乐分离，只保留打击乐轨道参与指纹比对。对旋律性强、背景音乐持续的广告效果更稳，代价是每个文件都要重新分离，无法复用 FFT 缓存
+
+12. **事件分类**：工具栏「模型」选择 `.mcrf` 模型文件，再点「分类事件」对列表中所有文件按时间打标签
+
+   - 每个事件在时间轴下方单独轨道展示，颜色按标签区分，标题行右侧有事件图例
+   - 事件轨道与广告段轨道相互独立，可同时查看；分类不参与裁剪决策
+   - 模型由命令行 `train` 子命令训练，详见下文
+
+   图形界面的完整控件说明、工作流与快捷键见 [docs/gui-usage.md](docs/gui-usage.md)。
+
 ## 命令行用法
 
 ### 检测广告
 
 ```bash
 mp3cutad-cli detect file1.mp3 file2.flac -o result.txt
+```
+
+启用 HPSS 源分离（较慢，无缓存复用）：
+
+```bash
+mp3cutad-cli detect --hpss file1.mp3 file2.flac -o result.txt
 ```
 
 ### 裁剪（使用已有检测结果）
@@ -164,12 +183,37 @@ mp3cutad-cli cut -i input_dir -o output_dir -r result.txt
 mp3cutad-cli auto -i input_dir -o output_dir
 ```
 
+### 训练事件分类模型
+
+数据列表每行格式为 `音频路径 标签`，相对路径按列表文件所在目录解析；同一行可用「A到B」标注区间内多段：
+
+```text
+/data/speech_001.wav 纯音
+/data/jingle_a.wav 噪声
+/data/mixed.wav 纯音到噪声
+```
+
+```bash
+mp3cutad-cli train -d data.txt -o model.mcrf --trees 100 --max-depth 32 --test-split 0.2
+```
+
+训练自动以 2 秒窗口、1 秒步长扩展样本，特征标准化后训练随机森林，并在留出的测试集上打印各标签的精确率、召回率与 F1。
+
+### 用模型分类音频
+
+```bash
+mp3cutad-cli classify a.mp3 b.flac -m model.mcrf --confidence 0.55
+```
+
+输出每个文件的总帧数与检测到的事件区间（起止时间、标签、置信度）。`--window` / `--hop` 可覆盖模型内的窗口与步长（单位秒）。
+
 ### 参数说明
 
 ```
 mp3cutad-cli detect [OPTIONS] <FILES>...
   <FILES>...                音频文件列表
   -o, --output <OUTPUT>     输出检测结果到文件
+      --hpss                启用 HPSS 打击乐轨道源分离
 
 mp3cutad-cli cut [OPTIONS] -i <INPUT_DIR> -o <OUTPUT_DIR> -r <RESULT_FILE>
   -i, --input-dir <DIR>     输入目录
@@ -179,6 +223,21 @@ mp3cutad-cli cut [OPTIONS] -i <INPUT_DIR> -o <OUTPUT_DIR> -r <RESULT_FILE>
 mp3cutad-cli auto [OPTIONS] -i <INPUT_DIR> -o <OUTPUT_DIR>
   -i, --input-dir <DIR>     输入目录
   -o, --output-dir <DIR>    输出目录
+
+mp3cutad-cli train [OPTIONS] -d <DATA_LIST> -o <OUTPUT>
+  -d, --data-list <FILE>    数据列表（每行 "路径 标签"）
+  -o, --output <FILE>       输出的 .mcrf 模型文件
+      --trees <N>           随机森林树数量，默认 100
+      --max-depth <N>       单棵树最大深度，默认 32
+      --test-split <R>      测试集比例，默认 0.2
+      --seed <N>            随机种子，默认 42
+
+mp3cutad-cli classify [OPTIONS] <FILES>...
+  <FILES>...                音频文件列表
+  -m, --model <FILE>        模型文件（必填）
+  -w, --window <SEC>        覆盖窗口时长
+      --hop <SEC>           覆盖窗口步长
+  -c, --confidence <R>      置信度阈值，默认 0.55
 ```
 
 ### 退出与跳过规则
@@ -236,6 +295,29 @@ mp3cutad-cli auto [OPTIONS] -i <INPUT_DIR> -o <OUTPUT_DIR>
 
 调整这些常量会改变检测结果，建议先用少量样本对比调整前后的区间与匹配度；块级置信度只影响展示与排序，不影响裁剪决策。
 
+### HPSS 源分离（可选）
+
+启用后在第 1 步与第 2 步之间插入一次分离，其余步骤不变：
+
+1. 对 22050Hz 单声道采样做 STFT（`n_fft=2048`，`hop=1024`）
+2. 分别沿时间轴（窗口 17）与频率轴（窗口 11）做中值滤波，得到谐波分量与打击乐分量
+3. 用软掩码按能量比例分配频谱，保留 STFT 相位做逆变换回时域
+4. 只把打击乐轨道写回临时 WAV 并继续做 FFT / 哈希
+
+人声与音乐的持续音更偏谐波，广告中的音效、节奏点更偏打击乐，因此只比对打击乐轨道能降低背景音乐造成的假相似。代价是每次检测都要重新分离，不复用 FFT 与哈希缓存。参数定义在 [src/core/separation.rs](src/core/separation.rs)（`HpssParams`）。
+
+### 事件分类
+
+事件分类与广告检测相互独立，是一条可选的旁路：
+
+1. 把音频转为 22050Hz 单声道，按窗口（默认 2 秒）与步长（默认 1 秒）切片
+2. 每段提取 128 维段级特征（40 维 Mel、13 维 MFCC、6 波段谱对比度及其统计量，`n_fft=2048`）
+3. 用训练时保存的均值/标准差做标准化，送入随机森林（默认 100 棵树、最大深度 32）
+4. 置信度低于阈值（默认 0.55）的窗口标记为「无事件」，再经多数投票平滑（窗口 3）
+5. 合并相邻同标签窗口，输出事件区间（起止帧、标签、平均置信度）
+
+模型以 `.mcrf` 保存（`MCRF` 魔数 + 版本号 + bincode 数据），加载时会校验特征维度、标签数、树数与节点总数，避免损坏文件导致崩溃。相关实现见 [segfeat.rs](src/core/segfeat.rs)、[forest.rs](src/core/forest.rs)、[model.rs](src/core/model.rs)、[classify.rs](src/core/classify.rs)。
+
 ## 输出格式与缓存
 
 **输出格式策略**（裁剪拼接时）：
@@ -246,7 +328,7 @@ mp3cutad-cli auto [OPTIONS] -i <INPUT_DIR> -o <OUTPUT_DIR>
 | FLAC | 无损重编码，保证时长元数据正确 |
 | OGG / OPUS / M4A / AAC / WMA | 重编码一次（流拷贝拼接易导致时间戳与时长错误） |
 
-**缓存**：检测中间结果（FFT 频谱图与 LSH 哈希）缓存在系统临时目录下的 `mp3cutad_rs`，以完整路径 + 文件修改时间校验，文件变更或缓存损坏会自动重算；解码产生的临时 WAV 在 FFT 计算完成后即删除。删除整个缓存目录不影响使用，只是下次需要重新计算。
+**缓存**：检测中间结果（FFT 频谱图与 LSH 哈希）缓存在系统临时目录下的 `mp3cutad_rs`，以完整路径 + 文件修改时间校验，文件变更或缓存损坏会自动重算；解码产生的临时 WAV 在 FFT 计算完成后即删除。启用 HPSS 时结果与常规缓存不可混用，因此不读也不写 FFT/哈希缓存。删除整个缓存目录不影响使用，只是下次需要重新计算。
 
 ## 项目结构
 
@@ -260,8 +342,13 @@ src/
 │   ├── lsh.rs        # 局部敏感哈希与相似度
 │   ├── features.rs   # MFCC / Chroma 多特征
 │   ├── viterbi.rs    # 时序一致性过滤
-│   ├── detect.rs     # 广告检测流程（含进度回调）
-│   └── range.rs      # 区间数据结构
+│   ├── detect.rs     # 广告检测流程（含进度回调、HPSS 开关）
+│   ├── range.rs      # 区间数据结构
+│   ├── separation.rs # HPSS 谐波-打击乐源分离
+│   ├── segfeat.rs    # 事件分类的段级特征（Mel/MFCC/谱对比度）
+│   ├── forest.rs     # 随机森林训练与预测
+│   ├── model.rs      # .mcrf 模型序列化与校验
+│   └── classify.rs   # 滑窗分类、平滑与事件合并
 ├── audio/            # 音频 I/O
 │   ├── ffmpeg.rs     # FFmpeg 封装（解码 / 裁剪 / 拼接）
 │   └── cache.rs      # 检测中间结果缓存
@@ -282,6 +369,9 @@ src/
 │   ├── settings.rs   # 阈值设置窗口
 │   └── fonts.rs      # 中文字体
 └── ffi.rs            # C ABI 接口
+
+docs/
+└── gui-usage.md      # 图形界面完整使用说明
 ```
 
 ## C ABI 接口
@@ -307,6 +397,9 @@ src/
 - **检测进度**：预处理与比对阶段均有细粒度进度回调
 - **结果可解释**：块级匹配度、置信度分色、能量包络与 Mel 频谱、按匹配度排序
 - **检测精度**：亚秒级边界精修、块级置信度（参考 pHash 的块级 BER 思路）
+- **抗背景音乐**：可选 HPSS 打击乐轨道分离，降低音乐造成的假相似
+- **事件分类**：随机森林 + 段级特征，支持命令行训练、GUI 可视化标签轨道
+- **模型安全**：`.mcrf` 带魔数与版本号，加载时校验维度、树数与节点总数
 
 ## 性能
 
@@ -321,7 +414,8 @@ src/
 - 多音频格式支持与拼接输出策略
 - 结果可解释性（区间匹配度、置信度分色、能量包络与 Mel 频谱、按匹配度排序）
 - 检测精度（块级置信度、亚秒级边界精修）
-- 检测进度、README 文档编写与更新
+- HPSS 源分离与随机森林事件分类（含模型文件格式与 GUI 标签轨道）
+- 检测进度、README 与 GUI 使用文档编写与更新
 
 所有改动均由维护者审阅、编译与实测验证。
 
@@ -332,4 +426,4 @@ MIT License
 ## 致谢
 
 - 原项目：[licstar/MP3CutAd](https://github.com/licstar/MP3CutAd)（C#），本项目的算法设计参考自该项目
-- Rust 生态：`rustfft`、`ndarray`、`rayon`、`hound`、`eframe/egui`、`rodio` 等
+- Rust 生态：`rustfft`、`ndarray`、`rayon`、`hound`、`serde`/`bincode`、`rand`、`eframe/egui`、`rodio` 等
