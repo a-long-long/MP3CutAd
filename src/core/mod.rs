@@ -9,3 +9,8 @@ pub mod fft;
 pub mod lsh;
 pub mod range;
 pub mod viterbi;
+pub mod segfeat;
+pub mod forest;
+pub mod model;
+pub mod classify;
+pub mod separation;

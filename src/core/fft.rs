@@ -31,7 +31,7 @@ pub fn process_wav(path: &Path) -> Result<Array2<f64>> {
 }
 
 /// 读取 WAV 文件的采样值
-fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
+pub(crate) fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
     let mut reader = hound::WavReader::open(path)?;
 
     let spec = reader.spec();

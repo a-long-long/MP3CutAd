@@ -19,7 +19,21 @@ use crate::core::features::{self, AudioFeatures};
 use crate::core::fft::{self, FFT_LEN};
 use crate::core::lsh;
 use crate::core::range::{Link, Range};
+use crate::core::separation::{self, HpssParams};
 use crate::core::viterbi::{self, Candidate};
+
+/// 检测选项
+#[derive(Debug, Clone, Default)]
+pub struct DetectOptions {
+    /// 是否启用 HPSS 源分离（分离打击乐轨道后再做检测）
+    /// 对带背景音乐的广告段，打击乐轨道匹配更稳定。
+    pub enable_hpss: bool,
+}
+
+impl DetectOptions {
+    pub fn new() -> Self { Self::default() }
+    pub fn with_hpss(mut self) -> Self { self.enable_hpss = true; self }
+}
 
 /// 哈希窗口大小（帧数）
 const HASH_WINDOW_SIZE: usize = 20;
@@ -64,18 +78,17 @@ pub struct DetectionResult {
 ///
 /// # 返回
 /// 每个文件的广告区间和总长度
+/// 检测一系列 MP3 文件中的广告（默认选项）
 pub fn detect_ad(mp3_files: &[PathBuf]) -> Result<DetectionResult> {
-    detect_ad_with_progress(mp3_files, |_, _| {})
+    detect_ad_with_progress(mp3_files, DetectOptions::default(), |_, _| {})
 }
 
-/// 带进度回调的广告检测
-///
-/// `on_progress(progress, message)`：
-/// - `progress` 为 0.0 ~ 1.0 的总体进度
-/// - `message` 为当前阶段的说明文本
-///
-/// 回调可能从多个并行线程调用，因此要求 `Sync`。
-pub fn detect_ad_with_progress<F>(mp3_files: &[PathBuf], on_progress: F) -> Result<DetectionResult>
+/// 带选项和进度回调的广告检测
+pub fn detect_ad_with_progress<F>(
+    mp3_files: &[PathBuf],
+    opts: DetectOptions,
+    on_progress: F,
+) -> Result<DetectionResult>
 where
     F: Fn(f32, &str) + Sync,
 {
@@ -100,33 +113,64 @@ where
     let total_steps = (num_files + pairs.len()).max(1);
     let done = AtomicUsize::new(0);
 
-    // 1. 处理每个文件：MP3 -> WAV -> FFT -> Features -> Hash（中间结果按文件缓存）
+    // 1. 处理每个文件：MP3 → WAV → (HPSS 可选) → FFT → Features → Hash
     for (idx, mp3_path) in mp3_files.iter().enumerate() {
-        let fft_data = match cache::read_fft(mp3_path) {
-            Some(data) => data,
-            None => {
-                let wav_path = cache::wav_path(mp3_path);
-                if !cache::is_fresh(mp3_path, &wav_path) {
-                    ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
-                }
-                let data = fft::process_wav(&wav_path)?;
-                cache::save_fft(mp3_path, &data)?;
-                let _ = std::fs::remove_file(&wav_path);
-                data
+        let file_name = mp3_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let (fft_data, hash_data) = if opts.enable_hpss {
+            // HPSS 路径：绕过 FFT/Hash 缓存，每次重新计算
+            let wav_path = cache::wav_path(mp3_path);
+            if !cache::is_fresh(mp3_path, &wav_path) {
+                ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
             }
+
+            on_progress(
+                idx as f32 / num_files as f32,
+                &format!("HPSS 分离中 {}/{}: {}", idx + 1, num_files, file_name),
+            );
+
+            // 读原始采样 → HPSS 打击乐 → 写临时 WAV
+            let raw = fft::read_wav_samples(&wav_path)?;
+            let perc = separation::separate_percussive(&raw)?;
+            let tmp_wav = std::env::temp_dir().join(format!("mp3cutad_hpss_{}.wav", idx));
+            write_f64_wav(&tmp_wav, &perc)?;
+
+            let fft = fft::process_wav(&tmp_wav)?;
+            let hash = lsh::hash_all(&fft, HASH_WINDOW_SIZE);
+            let _ = std::fs::remove_file(&wav_path);
+            let _ = std::fs::remove_file(&tmp_wav);
+            (fft, hash)
+        } else {
+            // 常规路径：使用缓存
+            let fft_data = match cache::read_fft(mp3_path) {
+                Some(data) => data,
+                None => {
+                    let wav_path = cache::wav_path(mp3_path);
+                    if !cache::is_fresh(mp3_path, &wav_path) {
+                        ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
+                    }
+                    let data = fft::process_wav(&wav_path)?;
+                    cache::save_fft(mp3_path, &data)?;
+                    let _ = std::fs::remove_file(&wav_path);
+                    data
+                }
+            };
+            let expected_hash_len = fft_data.nrows().saturating_sub(HASH_WINDOW_SIZE);
+            let hash_data = match cache::read_hash(mp3_path) {
+                Some(h) if h.len() == expected_hash_len => h,
+                _ => {
+                    let h = lsh::hash_all(&fft_data, HASH_WINDOW_SIZE);
+                    cache::save_hash(mp3_path, &h)?;
+                    h
+                }
+            };
+            (fft_data, hash_data)
         };
 
         let feature_data = features::extract_features(&fft_data);
-
-        let expected_hash_len = fft_data.nrows().saturating_sub(HASH_WINDOW_SIZE);
-        let hash_data = match cache::read_hash(mp3_path) {
-            Some(h) if h.len() == expected_hash_len => h,
-            _ => {
-                let h = lsh::hash_all(&fft_data, HASH_WINDOW_SIZE);
-                cache::save_hash(mp3_path, &h)?;
-                h
-            }
-        };
 
         ffts.push(fft_data);
         feats.push(feature_data);
@@ -739,4 +783,23 @@ pub fn reverse_range(ranges: &[Range], total_len: usize) -> Vec<Range> {
     }
 
     result
+}
+
+/// 将 f64 采样（已归一化）写为单声道 int16 WAV（22050Hz）
+fn write_f64_wav(path: &std::path::Path, samples: &[f64]) -> Result<()> {
+    use hound::{SampleFormat, WavSpec, WavWriter};
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 22050,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut w = WavWriter::create(path, spec)?;
+    for &s in samples {
+        let clipped = s.clamp(-1.0, 1.0);
+        let v = (clipped * 32767.0) as i16;
+        w.write_sample(v)?;
+    }
+    w.finalize()?;
+    Ok(())
 }

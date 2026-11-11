@@ -24,4 +24,6 @@ pub mod gui;
 pub use audio::ffmpeg::{audio_to_wav, cut_and_combine};
 pub use core::detect::{detect_ad, reverse_range, DetectionResult};
 pub use core::range::Range;
+pub use core::classify::{EventRange, ClassifyOptions};
+pub use core::model::ModelFile;
 pub use pipeline::{collect_audio_files, cut_file, is_supported_audio, keep_segments};

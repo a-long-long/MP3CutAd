@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// 缓存格式版本，算法或参数变化时递增，使旧缓存自动失效
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 /// 缓存目录名
 const CACHE_DIR_NAME: &str = "mp3cutad_rs";
 

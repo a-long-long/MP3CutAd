@@ -1,4 +1,6 @@
-//! 中央结果视图：音频条、广告段与时间刻度
+//! 中央结果视图：音频条、广告段、事件分类与时间刻度
+
+use std::collections::HashMap;
 
 use egui::{self, Context};
 
@@ -10,18 +12,20 @@ use super::state::{FileInfo, SharedState};
 
 /// 音频条高度
 const TRACK_HEIGHT: f32 = 28.0;
+/// 事件分类轨道高度
+const EVENT_TRACK_HEIGHT: f32 = 20.0;
 /// 时间刻度高度
 const TICK_HEIGHT: f32 = 20.0;
 
 /// 检测结果面板
 pub fn show(ctx: &Context, state: &SharedState) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        let mut detected: Vec<(usize, FileInfo)> = {
+        let mut all_files: Vec<(usize, FileInfo)> = {
             let s = state.lock().unwrap();
             s.files
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| f.detected)
+                .filter(|(_, f)| f.detected || f.classified || !f.event_ranges.is_empty())
                 .map(|(i, f)| (i, f.clone()))
                 .collect()
         };
@@ -32,30 +36,45 @@ pub fn show(ctx: &Context, state: &SharedState) {
         };
         if sort_by_score {
             // 匹配度高的排在前面；未知匹配度（旧结果）排最后
-            detected.sort_by(|a, b| {
+            all_files.sort_by(|a, b| {
                 let sa = average_score(&a.1, thresholds).unwrap_or(-1.0);
                 let sb = average_score(&b.1, thresholds).unwrap_or(-1.0);
                 sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
 
-        if detected.is_empty() {
+        if all_files.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.heading("检测完成后在此显示结果");
+                ui.heading("检测/分类完成后在此显示结果");
             });
             return;
         }
 
-        let ads_total: usize = detected
+        let ads_total: usize = all_files
             .iter()
             .map(|(_, f)| f.effective_ad_count(thresholds))
             .sum();
+        let events_total: usize = all_files
+            .iter()
+            .map(|(_, f)| f.event_ranges.len())
+            .sum();
         ui.horizontal(|ui| {
-            ui.heading(format!(
-                "检测结果 ({} 个文件, {} 个广告段)",
-                detected.len(),
-                ads_total
-            ));
+            let label = match (ads_total > 0, events_total > 0) {
+                (true, true) => format!(
+                    "检测结果 ({} 文件, {} 广告段, {} 事件)",
+                    all_files.len(), ads_total, events_total
+                ),
+                (true, false) => format!(
+                    "检测结果 ({} 文件, {} 广告段)",
+                    all_files.len(), ads_total
+                ),
+                (false, true) => format!(
+                    "分类结果 ({} 文件, {} 事件)",
+                    all_files.len(), events_total
+                ),
+                _ => format!("结果 ({} 文件)", all_files.len()),
+            };
+            ui.heading(label);
 
             let mut show_spectrogram = state.lock().unwrap().show_spectrogram;
             if ui
@@ -76,6 +95,19 @@ pub fn show(ctx: &Context, state: &SharedState) {
 
             ui.separator();
             confidence_legend(ui, thresholds);
+
+            // 事件标签图例（只在有事件分类结果时显示）
+            let all_labels: Vec<String> = {
+                let mut labels: Vec<String> = all_files
+                    .iter()
+                    .flat_map(|(_, f)| f.event_ranges.iter().map(|e| e.label.clone()))
+                    .collect();
+                labels.sort(); labels.dedup(); labels
+            };
+            if !all_labels.is_empty() {
+                ui.separator();
+                event_legend(ui, &all_labels);
+            }
         });
         ui.separator();
 
@@ -88,14 +120,14 @@ pub fn show(ctx: &Context, state: &SharedState) {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             let colors = ad_colors();
-            for (file_idx, file) in &detected {
+            for (file_idx, file) in &all_files {
                 draw_file_track(ui, ctx, state, *file_idx, file, &colors, thresholds);
             }
         });
     });
 }
 
-/// 绘制单个文件的摘要、音频条与时间刻度
+/// 绘制单个文件的摘要、音频条、事件轨道与时间刻度
 fn draw_file_track(
     ui: &mut egui::Ui,
     ctx: &Context,
@@ -108,25 +140,41 @@ fn draw_file_track(
     let file_len = file.length as f32;
     let effective_ads: Vec<&crate::core::range::Range> =
         file.effective_ads(thresholds).collect();
+    let event_ranges = &file.event_ranges;
+
     // 剩余时长按实际会被裁剪的段计算，与保存结果保持一致
-    let effective_owned: Vec<crate::core::range::Range> =
-        effective_ads.iter().map(|r| **r).collect();
-    let remaining_segments = reverse_range(&effective_owned, file.length);
-    let remaining_duration: f64 = remaining_segments
-        .iter()
-        .map(|r| (r.end - r.begin) as f64 / 10.0)
-        .sum();
+    let remaining_duration = if !effective_ads.is_empty() {
+        let effective_owned: Vec<crate::core::range::Range> =
+            effective_ads.iter().map(|r| **r).collect();
+        let remaining_segments = reverse_range(&effective_owned, file.length);
+        remaining_segments
+            .iter()
+            .map(|r| (r.end - r.begin) as f64 / 10.0)
+            .sum()
+    } else {
+        file.length as f64 / 10.0
+    };
     let avg_score = average_score(file, thresholds);
 
     ui.horizontal(|ui| {
-        ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "✓");
+        // 状态图标
+        let icon = if file.detected && file.classified { "⚡" }
+            else if file.detected { "✓" }
+            else if file.classified { "🎯" }
+            else { "○" };
+        ui.label(icon);
         ui.strong(&file.name);
+
+        let orig_dur = if file.length > 0 { file.length as f64 / 10.0 } else { 0.0 };
         let mut summary = format!(
-            "  原始: {:.1}s | 剩余: {:.1}s | 删除 {} 个广告段",
-            file.length as f64 / 10.0,
-            remaining_duration,
-            effective_ads.len()
+            "  原始: {:.1}s", orig_dur
         );
+        if !effective_ads.is_empty() {
+            summary.push_str(&format!(" | 剩余: {:.1}s | {} 广告段", remaining_duration, effective_ads.len()));
+        }
+        if !event_ranges.is_empty() {
+            summary.push_str(&format!(" | {} 事件", event_ranges.len()));
+        }
         if let Some(score) = avg_score {
             summary.push_str(&format!(" | 平均匹配度: {:.0}%", score * 100.0));
         }
@@ -239,6 +287,11 @@ fn draw_file_track(
                 &bar_resp,
             );
         }
+
+        // 事件分类轨道（叠加在音频条下方）
+        if !event_ranges.is_empty() {
+            draw_event_track(ui, file_len, event_ranges, bar_rect);
+        }
     }
 
     draw_time_ticks(ui, file_len as f64 / 10.0);
@@ -255,6 +308,79 @@ fn draw_file_track(
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(4.0);
+}
+
+/// 在主音频条下方绘制事件分类轨道（边框样式 + 标签 + 置信度）
+fn draw_event_track(
+    ui: &mut egui::Ui,
+    file_len: f32,
+    events: &[crate::core::classify::EventRange],
+    above_bar_rect: egui::Rect,
+) {
+    let bar_width = ui.available_width();
+    let (resp, painter) =
+        ui.allocate_painter(egui::vec2(bar_width, EVENT_TRACK_HEIGHT), egui::Sense::hover());
+    let event_rect = resp.rect;
+
+    // 事件轨道背景（比主条浅）
+    painter.rect_filled(event_rect, 2.0, egui::Color32::from_rgb(22, 26, 32));
+    painter.rect_stroke(
+        event_rect, 2.0,
+        egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 55, 60)),
+    );
+
+    // 为每个 label 分配一个颜色
+    let mut label_color_map: HashMap<String, egui::Color32> = HashMap::new();
+    let event_palette = event_palette();
+    let mut color_idx = 0usize;
+
+    for ev in events {
+        let x0 = event_rect.left() + (ev.begin as f32 / file_len) * event_rect.width();
+        let x1 = event_rect.left() + (ev.end as f32 / file_len) * event_rect.width();
+        let seg_rect = egui::Rect::from_x_y_ranges(
+            x0.max(event_rect.left())..=x1.min(event_rect.right()),
+            event_rect.top() + 2.0..=event_rect.bottom() - 2.0,
+        );
+
+        let color = *label_color_map.entry(ev.label.clone()).or_insert_with(|| {
+            let c = event_palette[color_idx % event_palette.len()];
+            color_idx += 1;
+            c
+        });
+
+        // 填充（低 alpha）+ 边框（高 alpha）
+        let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 50);
+        painter.rect_filled(seg_rect, 2.0, fill);
+        painter.rect_stroke(
+            seg_rect, 2.0,
+            egui::Stroke::new(1.5, color),
+        );
+
+        // 标签文字 + 置信度（段够宽才显示）
+        let seg_width = x1 - x0;
+        if seg_width > 60.0 {
+            let label_text = format!(
+                "{} {:.0}%",
+                ev.label, ev.confidence * 100.0
+            );
+            painter.text(
+                egui::pos2((x0 + x1) / 2.0, seg_rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                label_text,
+                egui::FontId::proportional(9.0),
+                egui::Color32::WHITE,
+            );
+        } else if seg_width > 25.0 {
+            // 窄段只显示置信度
+            painter.text(
+                egui::pos2((x0 + x1) / 2.0, seg_rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", ev.confidence * 100.0),
+                egui::FontId::proportional(8.0),
+                egui::Color32::from_rgb(200, 200, 200),
+            );
+        }
+    }
 }
 
 /// 处理音频条点击：选中广告段（Ctrl）或切换播放
@@ -409,4 +535,36 @@ fn confidence_legend(ui: &mut egui::Ui, thresholds: crate::gui::state::Threshold
             .small()
             .color(egui::Color32::from_gray(150)),
     );
+}
+
+/// 事件分类调色板（比广告段更冷色调，区分开）
+fn event_palette() -> Vec<egui::Color32> {
+    vec![
+        egui::Color32::from_rgb(100, 200, 255),  // 浅蓝
+        egui::Color32::from_rgb(150, 255, 150),  // 浅绿
+        egui::Color32::from_rgb(255, 180, 100),  // 橙黄
+        egui::Color32::from_rgb(200, 150, 255),  // 淡紫
+        egui::Color32::from_rgb(100, 255, 220),  // 青
+        egui::Color32::from_rgb(255, 140, 180),  // 粉红
+        egui::Color32::from_rgb(255, 230, 100),  // 亮黄
+        egui::Color32::from_rgb(140, 200, 140),  // 苔绿
+    ]
+}
+
+/// 事件标签图例（所有出现过的 label + 对应颜色）
+fn event_legend(ui: &mut egui::Ui, labels: &[String]) {
+    let palette = event_palette();
+    ui.label(
+        egui::RichText::new("🎯 事件")
+            .small()
+            .color(egui::Color32::from_gray(180)),
+    );
+    for (i, label) in labels.iter().enumerate() {
+        let color = palette[i % palette.len()];
+        ui.label(
+            egui::RichText::new(format!("▢ {}", label))
+                .small()
+                .color(color),
+        );
+    }
 }

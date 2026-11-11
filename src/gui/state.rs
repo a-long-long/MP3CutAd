@@ -1,5 +1,6 @@
 //! GUI 状态模型
 
+use crate::core::classify::EventRange;
 use crate::core::range::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,9 @@ pub struct FileInfo {
     pub needs_save: bool,
     /// 被标记删除的广告索引（在有效广告段中的索引）
     pub marked_for_deletion: Vec<usize>,
+    /// 事件分类结果（标签 + 置信度）
+    pub event_ranges: Vec<EventRange>,
+    pub classified: bool,
 }
 
 /// 广告段的过滤与展示阈值
@@ -129,6 +133,12 @@ pub struct AppState {
     pub sort_by_score: bool,
     /// 当前选中文件的可视化纹理缓存
     pub viz_cache: Option<super::spectrogram::VizCache>,
+    /// 事件分类模型路径
+    pub model_path: Option<PathBuf>,
+    /// 分类置信度阈值
+    pub classify_confidence: f64,
+    /// 是否启用 HPSS 源分离（打击乐轨道检测广告段）
+    pub enable_hpss: bool,
 }
 
 impl Default for AppState {
@@ -148,6 +158,9 @@ impl Default for AppState {
             show_spectrogram: false,
             sort_by_score: false,
             viz_cache: None,
+            model_path: None,
+            classify_confidence: 0.55,
+            enable_hpss: false,
         }
     }
 }
