@@ -1,6 +1,5 @@
 //! 顶部工具栏与底部状态栏
 
-use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -118,11 +117,8 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             let files_to_save = {
                 let s = state.lock().unwrap();
-                // 与 save.rs 一致：只有被「删除已选」标记过的文件才会被保存
-                s.files
-                    .iter()
-                    .filter(|f| f.detected && !f.marked_for_deletion.is_empty())
-                    .count()
+                // 与 save.rs 一致：只有被「删除所选」标记过的文件才会被保存
+                s.files.iter().filter(|f| f.needs_cut()).count()
             };
 
             let save_label = if files_to_save > 0 {
@@ -326,28 +322,11 @@ fn select_all_ads(state: &SharedState) {
 /// 把选中的广告段标记为删除（保存时才真正写入文件）
 fn mark_selected_for_deletion(state: &SharedState) {
     let mut s = state.lock().unwrap();
-
-    let mut by_file: HashMap<usize, Vec<usize>> = HashMap::new();
-    for &(file_idx, ad_idx) in &s.ads_to_delete {
-        by_file.entry(file_idx).or_default().push(ad_idx);
-    }
-
-    let mut added = 0usize;
-    for (file_idx, ad_indices) in by_file {
-        if let Some(file) = s.files.get_mut(file_idx) {
-            for idx in ad_indices {
-                if !file.marked_for_deletion.contains(&idx) {
-                    file.marked_for_deletion.push(idx);
-                    added += 1;
-                }
-            }
-            file.needs_save = true;
-        }
-    }
-
-    s.ads_to_delete.clear();
-
     let th = s.thresholds;
+
+    let selection = std::mem::take(&mut s.ads_to_delete);
+    let added = super::state::mark_ads_for_deletion(&mut s.files, th, &selection);
+
     let marked: usize = s
         .files
         .iter()

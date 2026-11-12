@@ -115,6 +115,47 @@ impl FileInfo {
     pub fn effective_ad_count(&self, th: Thresholds) -> usize {
         self.effective_ads(th).count()
     }
+
+    /// 已标记删除的有效广告段（保存与界面统计共用）
+    pub fn marked_segments(&self, th: Thresholds) -> Vec<Range> {
+        self.effective_ads(th)
+            .enumerate()
+            .filter(|(idx, _)| self.marked_for_deletion.contains(idx))
+            .map(|(_, r)| *r)
+            .collect()
+    }
+
+    /// 是否有需要保存的标记（已检测且至少标记了一个段）
+    pub fn needs_cut(&self) -> bool {
+        self.detected && !self.marked_for_deletion.is_empty()
+    }
+}
+
+/// 把选中的广告段标记为删除
+///
+/// 选中项为 `(文件索引, 有效广告段索引)`；下标越界或重复的选中项会被忽略。
+/// 返回本次新增的标记数量。
+pub fn mark_ads_for_deletion(
+    files: &mut [FileInfo],
+    th: Thresholds,
+    selection: &[(usize, usize)],
+) -> usize {
+    let mut added = 0usize;
+    for &(file_idx, ad_idx) in selection {
+        let Some(file) = files.get_mut(file_idx) else {
+            continue;
+        };
+        if ad_idx >= file.effective_ad_count(th) {
+            continue;
+        }
+        if file.marked_for_deletion.contains(&ad_idx) {
+            continue;
+        }
+        file.marked_for_deletion.push(ad_idx);
+        file.needs_save = true;
+        added += 1;
+    }
+    added
 }
 
 /// 播放状态
@@ -255,5 +296,110 @@ mod tests {
             assert!(!mode.matches(0.0, 0.0, th));
         }
         assert!(!MatchMode::Custom.matches(0.0, 0.0, th));
+    }
+
+    fn range(begin: i32, end: i32, count: i32) -> Range {
+        Range::new(begin, end, count)
+    }
+
+    fn file_with(ranges: Vec<Range>) -> FileInfo {
+        FileInfo {
+            detected: true,
+            ad_ranges: ranges,
+            ..Default::default()
+        }
+    }
+
+    fn segments(ranges: &[Range]) -> Vec<(i32, i32)> {
+        ranges.iter().map(|r| (r.begin, r.end)).collect()
+    }
+
+    #[test]
+    fn mark_ads_marks_each_segment_once() {
+        let mut files = vec![file_with(vec![
+            range(0, 10, 2),
+            range(100, 120, 2),
+            range(200, 230, 2),
+        ])];
+
+        let added = mark_ads_for_deletion(
+            &mut files,
+            Thresholds::default(),
+            &[(0, 0), (0, 0), (0, 2), (0, 2)],
+        );
+
+        assert_eq!(added, 2);
+        assert_eq!(files[0].marked_for_deletion, vec![0, 2]);
+        assert!(files[0].needs_save);
+        assert!(files[0].needs_cut());
+    }
+
+    #[test]
+    fn mark_ads_ignores_invalid_selection() {
+        let mut files = vec![file_with(vec![range(0, 10, 2)])];
+
+        // 文件索引越界、广告索引越界都应被忽略
+        let added = mark_ads_for_deletion(&mut files, Thresholds::default(), &[(5, 0), (0, 3)]);
+
+        assert_eq!(added, 0);
+        assert!(files[0].marked_for_deletion.is_empty());
+        assert!(!files[0].needs_cut());
+    }
+
+    #[test]
+    fn marked_index_maps_to_effective_segment() {
+        // 第一段 count=1 会被默认阈值过滤，标记索引 0 应落在第二段（50–70）
+        let mut files = vec![file_with(vec![
+            range(0, 10, 1),
+            range(50, 70, 3),
+            range(100, 120, 2),
+        ])];
+        let th = Thresholds::default();
+
+        mark_ads_for_deletion(&mut files, th, &[(0, 0), (0, 1)]);
+
+        assert_eq!(
+            segments(&files[0].marked_segments(th)),
+            vec![(50, 70), (100, 120)]
+        );
+    }
+
+    #[test]
+    fn marked_segments_are_cut_and_surrounding_audio_joined() {
+        let mut files = vec![file_with(vec![range(100, 200, 2), range(400, 450, 2)])];
+        let th = Thresholds::default();
+        mark_ads_for_deletion(&mut files, th, &[(0, 0)]);
+
+        let cut = files[0].marked_segments(th);
+        assert_eq!(segments(&cut), vec![(100, 200)]);
+
+        // 保存时保留的是补集：删除段前后被拼接起来
+        let keep = crate::pipeline::keep_segments(&cut, 1000);
+        assert_eq!(keep, vec![(0, 100), (200, 1000)]);
+    }
+
+    #[test]
+    fn stale_mark_yields_no_segment_after_threshold_change() {
+        let mut files = vec![file_with(vec![range(0, 10, 2), range(100, 120, 1)])];
+
+        let mut lenient = Thresholds::default();
+        lenient.min_count = 1;
+        mark_ads_for_deletion(&mut files, lenient, &[(0, 1)]);
+        assert_eq!(files[0].marked_segments(lenient).len(), 1);
+
+        // 阈值收紧后该段不再有效，保存时会跳过而不是删错段
+        let strict = Thresholds::default();
+        assert!(files[0].marked_segments(strict).is_empty());
+    }
+
+    #[test]
+    fn needs_cut_requires_detection() {
+        let mut files = vec![file_with(vec![range(0, 10, 2)])];
+        files[0].detected = false;
+
+        mark_ads_for_deletion(&mut files, Thresholds::default(), &[(0, 0)]);
+
+        assert_eq!(files[0].marked_for_deletion, vec![0]);
+        assert!(!files[0].needs_cut());
     }
 }

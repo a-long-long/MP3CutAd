@@ -143,11 +143,7 @@ fn draw_file_track(
     let event_ranges = &file.event_ranges;
 
     // 剩余时长按实际会被裁剪的段（已标记删除）计算，与保存结果保持一致
-    let marked_owned: Vec<crate::core::range::Range> = file
-        .marked_for_deletion
-        .iter()
-        .filter_map(|&idx| effective_ads.get(idx).copied().copied())
-        .collect();
+    let marked_owned = file.marked_segments(thresholds);
     let remaining_duration = if marked_owned.is_empty() {
         file.length as f64 / 10.0
     } else {

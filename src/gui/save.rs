@@ -4,7 +4,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::thread;
 
-use crate::core::range::Range;
 use crate::pipeline;
 
 use super::state::{AppState, FileInfo, SharedState};
@@ -37,11 +36,11 @@ fn save_all(state: &SharedState) {
         return;
     }
 
-    // 只处理用户通过「删除已选」标记过的文件（未标记的文件不动）
+    // 只处理用户通过「删除所选」标记过的文件（未标记的文件不动）
     let targets: Vec<(usize, FileInfo)> = files
         .into_iter()
         .enumerate()
-        .filter(|(_, f)| f.detected && !f.marked_for_deletion.is_empty())
+        .filter(|(_, f)| f.needs_cut())
         .collect();
 
     if targets.is_empty() {
@@ -80,12 +79,7 @@ fn save_all(state: &SharedState) {
         }
 
         // 只删除被标记的段（索引基于当前有效广告段）
-        let effective: Vec<Range> = file.effective_ads(thresholds).copied().collect();
-        let ad_ranges: Vec<Range> = file
-            .marked_for_deletion
-            .iter()
-            .filter_map(|&idx| effective.get(idx).copied())
-            .collect();
+        let ad_ranges = file.marked_segments(thresholds);
         if ad_ranges.is_empty() {
             // 标记的段在当前阈值下已失效，跳过
             done += 1;
