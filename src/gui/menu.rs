@@ -286,7 +286,10 @@ fn start_detection(state: &SharedState) {
                 }
                 s.is_processing = false;
                 s.progress = 1.0;
-                s.status_message = "检测完成！".to_string();
+                s.status_message = match &result.gpu {
+                    Some(gpu) => format!("检测完成！（GPU 加速: {}）", gpu),
+                    None => "检测完成！".to_string(),
+                };
             }
             Ok(Err(e)) => {
                 let mut s = state.lock().unwrap();

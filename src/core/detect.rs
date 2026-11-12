@@ -49,6 +49,8 @@ const FINE_TUNE_STEP: usize = 1;
 const FINE_TUNE_WINDOW: usize = 4;
 /// 位置偏移搜索范围
 const POSITION_SEARCH_RANGE: usize = 5;
+/// 单对文件交给 GPU 的最大候选数，超出后回退 CPU 以控制显存与内存
+const MAX_GPU_PAIRS: usize = 4_000_000;
 /// 边界收紧阈值：高于此值才保留
 const BOUNDARY_TIGHTEN_THRESHOLD: f64 = 0.75;
 /// 块级置信度：每块的帧数（10 帧 = 1 秒）
@@ -69,6 +71,8 @@ pub struct DetectionResult {
     pub ranges: Vec<Vec<Range>>,
     /// 每个文件的总帧数
     pub lengths: Vec<usize>,
+    /// 实际使用的 GPU 后端名称（未使用 GPU 时为 None）
+    pub gpu: Option<String>,
 }
 
 /// 检测一系列 MP3 文件中的广告
@@ -97,6 +101,7 @@ where
         return Ok(DetectionResult {
             ranges: Vec::new(),
             lengths: Vec::new(),
+            gpu: None,
         });
     }
 
@@ -214,13 +219,15 @@ where
     // 2. 两两比较，查找相似片段
     let links: Arc<Mutex<Vec<Link>>> = Arc::new(Mutex::new(Vec::new()));
     let ranges: Arc<Mutex<Vec<Vec<Range>>>> = Arc::new(Mutex::new(vec![Vec::new(); num_files]));
+    let gpu_used = std::sync::atomic::AtomicBool::new(false);
 
     pairs.par_iter().for_each(|&(i, j)| {
         let ranges_i = Arc::new(Mutex::new(Vec::new()));
         let ranges_j = Arc::new(Mutex::new(Vec::new()));
 
-        // 2.1 自适应阈值 + 多探针 LSH
-        let raw_candidates = check_same_adaptive(&ffts[i], &ffts[j], &hashes[i], &hashes[j]);
+        // 2.1 自适应阈值 + 多探针 LSH（可选的 GPU 批量相似度）
+        let raw_candidates =
+            check_same_adaptive(&ffts[i], &ffts[j], &hashes[i], &hashes[j], &gpu_used);
 
         // 2.2 Viterbi 时序一致性过滤
         let filtered_candidates = viterbi_filter_candidates(&raw_candidates);
@@ -277,7 +284,15 @@ where
         }
     }
 
-    Ok(DetectionResult { ranges, lengths })
+    Ok(DetectionResult {
+        ranges,
+        lengths,
+        gpu: if gpu_used.load(Ordering::Relaxed) {
+            crate::core::gpu::backend_name()
+        } else {
+            None
+        },
+    })
 }
 
 /// 自适应阈值 + 多探针 LSH 候选匹配
@@ -286,42 +301,41 @@ fn check_same_adaptive(
     fft2: &Array2<f64>,
     hash1: &[i32],
     hash2: &[i32],
+    gpu_used: &std::sync::atomic::AtomicBool,
 ) -> Vec<(usize, usize, f64)> {
     let mut pos: HashMap<i32, Vec<usize>> = HashMap::new();
     for (i, &h) in hash2.iter().enumerate() {
         pos.entry(h).or_default().push(i);
     }
 
-    let mut all_scores: Vec<f64> = Vec::new();
-    let mut best_per_frame: Vec<(usize, usize, f64)> = Vec::new();
-
+    // 先收集每个采样帧的全部候选取位置，再统一计算相似度（便于 GPU 批量处理）
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     for (i, &h) in hash1.iter().enumerate().step_by(HASH_WINDOW_SIZE) {
-        let mut best_sim = 0.0f64;
-        let mut best_pos = 0usize;
-
+        let mut positions = Vec::new();
         // 多探针 LSH：检查原始哈希 + 邻近哈希
-        let probes = lsh::multi_probe_hashes(h);
-        for probe_h in probes {
-            if let Some(positions) = pos.get(&probe_h) {
-                for &p in positions {
-                    let sim = lsh::cosine_sim(fft1, fft2, i, p, HASH_WINDOW_SIZE);
-                    if sim > best_sim {
-                        best_sim = sim;
-                        best_pos = p;
-                    }
-                }
+        for probe_h in lsh::multi_probe_hashes(h) {
+            if let Some(found) = pos.get(&probe_h) {
+                positions.extend_from_slice(found);
             }
         }
-
-        if best_sim >= MIN_THRESHOLD {
-            all_scores.push(best_sim);
-            best_per_frame.push((i, best_pos, best_sim));
+        if !positions.is_empty() {
+            groups.push((i, positions));
         }
     }
+
+    let mut best_per_frame = best_matches(fft1, fft2, &groups, gpu_used);
+
+    let all_scores: Vec<f64> = best_per_frame
+        .iter()
+        .map(|&(_, _, sim)| sim)
+        .filter(|&sim| sim >= MIN_THRESHOLD)
+        .collect();
 
     if all_scores.is_empty() {
         return Vec::new();
     }
+
+    best_per_frame.retain(|&(_, _, sim)| sim >= MIN_THRESHOLD);
 
     // 自适应阈值：mean + 1.0 * std，限制在 [MIN_THRESHOLD, MAX_THRESHOLD]
     let n = all_scores.len() as f64;
@@ -333,6 +347,83 @@ fn check_same_adaptive(
     best_per_frame
         .into_iter()
         .filter(|&(_, _, sim)| sim >= adaptive_threshold)
+        .collect()
+}
+
+/// 计算每个帧组的最高相似度及对应位置
+///
+/// 优先尝试 GPU 批量计算，不可用时回退到 CPU（AVX2/标量）实现。
+fn best_matches(
+    fft1: &Array2<f64>,
+    fft2: &Array2<f64>,
+    groups: &[(usize, Vec<usize>)],
+    gpu_used: &std::sync::atomic::AtomicBool,
+) -> Vec<(usize, usize, f64)> {
+    let total: usize = groups.iter().map(|(_, ps)| ps.len()).sum();
+    if total == 0 || total > MAX_GPU_PAIRS {
+        return cpu_best_matches(fft1, fft2, groups);
+    }
+
+    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(total);
+    for &(i, ref positions) in groups {
+        for &p in positions {
+            pairs.push((i, p));
+        }
+    }
+
+    if let Some(scores) = crate::core::gpu::cosine_pairs(fft1, fft2, &pairs, HASH_WINDOW_SIZE) {
+        gpu_used.store(true, Ordering::Relaxed);
+        let mut out = Vec::with_capacity(groups.len());
+        let mut k = 0usize;
+        for &(i, ref positions) in groups {
+            let start = k;
+            let mut max_sim = 0.0f64;
+            for _ in 0..positions.len() {
+                let sim = scores[k];
+                k += 1;
+                if sim > max_sim {
+                    max_sim = sim;
+                }
+            }
+            // 重复素材会大量出现几乎相同的分数，GPU 的 f32 舍入会打乱次序；
+            // 取第一个与最高分相差 1e-4 以内的位置，尽量还原 CPU 的选取结果。
+            let mut best_pos = positions[0];
+            for (off, &p) in positions.iter().enumerate() {
+                if scores[start + off] >= max_sim - 1e-4 {
+                    best_pos = p;
+                    break;
+                }
+            }
+            // 命中项用 f64 复算，保证后续阈值与链路使用与纯 CPU 一致的数值。
+            let exact = lsh::cosine_sim(fft1, fft2, i, best_pos, HASH_WINDOW_SIZE);
+            out.push((i, best_pos, exact));
+        }
+        return out;
+    }
+
+    cpu_best_matches(fft1, fft2, groups)
+}
+
+/// CPU 版本：逐组计算并选取最高相似度
+fn cpu_best_matches(
+    fft1: &Array2<f64>,
+    fft2: &Array2<f64>,
+    groups: &[(usize, Vec<usize>)],
+) -> Vec<(usize, usize, f64)> {
+    groups
+        .iter()
+        .map(|&(i, ref positions)| {
+            let mut best_sim = 0.0f64;
+            let mut best_pos = 0usize;
+            for &p in positions {
+                let sim = lsh::cosine_sim(fft1, fft2, i, p, HASH_WINDOW_SIZE);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_pos = p;
+                }
+            }
+            (i, best_pos, best_sim)
+        })
         .collect()
 }
 
@@ -498,13 +589,17 @@ fn fine_tune_multi(
             continue;
         }
 
-        // 第二个文件中与 start 对齐的位置
-        let q2 = (p2 as i64 + start as i64 - p1 as i64) as usize;
-        let score = block_confidence(feat1, feat2, start, q2, end - start);
+        // 第二个文件中与 start 对齐的位置（prev 可能为负，需防止下溢）
+        let q2 = (p2 as i64 + start as i64 - p1 as i64).max(0) as usize;
+        let span = end - start;
+        if q2 >= len2 || q2 + span > len2 {
+            continue;
+        }
+        let score = block_confidence(feat1, feat2, start, q2, span);
 
         let mut add1 = Range::new_simple(start as i32, end as i32);
         add1.score = score;
-        let mut add2 = Range::new_simple(q2 as i32, (q2 + (end - start)) as i32);
+        let mut add2 = Range::new_simple(q2 as i32, (q2 + span) as i32);
         add2.score = score;
 
         let r1 = create_range(ranges1, len1, add1);

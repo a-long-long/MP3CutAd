@@ -125,7 +125,11 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
         lengths.push(length);
     }
 
-    Ok(DetectionResult { ranges, lengths })
+    Ok(DetectionResult {
+        ranges,
+        lengths,
+        gpu: None,
+    })
 }
 
 fn next_line(lines: &mut impl Iterator<Item = std::io::Result<String>>) -> Result<String> {

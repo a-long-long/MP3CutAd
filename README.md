@@ -14,6 +14,7 @@
 - **命令行**：支持检测、裁剪、一键处理，适合批量任务
 - **C ABI 动态库**：便于其他语言或宿主程序集成
 - **并行计算**：基于 Rayon 自动利用多核 CPU
+- **GPU 加速（可选）**：在显卡上批量计算候选帧的余弦相似度，无可用显卡时自动回退 CPU
 - **结果缓存**：FFT 频谱与 LSH 指纹缓存到系统临时目录，重复检测时跳过解码与重算
 - **精确检测**：FFT 频谱分析 + LSH 局部敏感哈希 + 多特征融合 + Viterbi 时序过滤
 - **边界精修**：区间两端逐帧收紧（最多 5 帧），减少误切与漏切
@@ -58,15 +59,17 @@ build.bat
 # 库 + C ABI 动态库
 cargo build --release --lib
 
-# CLI
-cargo build --release --features cli --bin mp3cutad-cli
+# CLI（含 GPU 加速）
+cargo build --release --features cli,gpu --bin mp3cutad-cli
 
-# GUI
-cargo build --release --features gui --bin mp3cutad-gui
+# GUI（含 GPU 加速）
+cargo build --release --features gui,gpu --bin mp3cutad-gui
 
 # 一次性构建 CLI 与 GUI
-cargo build --release --features cli,gui
+cargo build --release --features cli,gui,gpu
 ```
+
+`gpu` 是可选 feature：不加时完全不链接 wgpu，检测走纯 CPU；加上后若找不到可用显卡会自动回退。`build.bat` 默认已包含 `gpu`。
 
 产物位于 `target/release/`：
 
@@ -108,6 +111,29 @@ GUI 通过 `env_logger` 初始化日志，需要排查问题时可打开调试�
 ```powershell
 $env:RUST_LOG="debug"; cargo run --features gui --bin mp3cutad-gui
 ```
+
+## GPU 加速
+
+编译时加上 `gpu` feature 后，检测阶段会把 LSH 候选帧的批量余弦相似度交给显卡计算：
+
+1. 先用指纹检索出每个采样帧的全部候选位置
+2. 所有 (帧A, 帧B) 配对一次性提交给 GPU（wgpu compute shader，按批分块）
+3. GPU 返回 f32 分数，每组取最优位置
+4. 命中位置再用 CPU 以 f64 复算一次，保证后续自适应阈值与 Viterbi 链路使用与纯 CPU 相同的数值
+
+**启用与回退**：
+
+| 情况 | 行为 |
+|---|---|
+| 未编译 `gpu` feature | 纯 CPU |
+| 找不到可用显卡 / 初始化失败 | 自动回退 CPU |
+| 候选对数 < 512 | CPU（避免调度开销） |
+| 候选对数 > 400 万 | CPU（控制显存占用） |
+| 设置环境变量 `MP3CUTAD_NO_GPU=1` | 强制 CPU |
+
+显卡后端由 wgpu 自动选择（Windows 下通常为 D3D12，也支持 Vulkan），需要可用的显卡驱动；无需安装 CUDA。检测完成时命令行会打印 `GPU 加速: <型号>`，图形界面在状态栏提示。
+
+**注意**：重复素材在目标文件里可能存在多个几乎等价的对齐位置，GPU 与 CPU 选中的锚点可能不同，区间边界偶尔会相差几帧；匹配度与整体判定不受影响。
 
 ## 图形界面
 
@@ -369,6 +395,7 @@ src/
 ├── gui_main.rs       # GUI 入口（薄壳）
 ├── core/             # 纯算法层（不执行外部程序）
 │   ├── fft.rs        # FFT 频谱分析
+│   ├── gpu.rs        # GPU 批量余弦相似度（feature: gpu）
 │   ├── lsh.rs        # 局部敏感哈希与相似度
 │   ├── features.rs   # MFCC / Chroma 多特征
 │   ├── viterbi.rs    # 时序一致性过滤
@@ -426,6 +453,7 @@ docs/
 - **时序约束**：Viterbi 时序一致性过滤
 - **多探针 LSH**：容错哈希查询
 - **SIMD 优化**：x86_64 AVX2 余弦相似度
+- **GPU 加速**：可选 wgpu 批量余弦相似度，GPU 初筛 + CPU f64 复算，避免精度影响判定
 - **检测进度**：预处理与比对阶段均有细粒度进度回调
 - **结果可解释**：块级匹配度、置信度分色、能量包络与 Mel 频谱、按匹配度排序
 - **检测精度**：亚秒级边界精修、块级置信度（参考 pHash 的块级 BER 思路）
@@ -447,6 +475,7 @@ docs/
 - 多音频格式支持与拼接输出策略
 - 结果可解释性（区间匹配度、置信度分色、能量包络与 Mel 频谱、按匹配度排序）
 - 检测精度（块级置信度、亚秒级边界精修）
+- GPU 加速路径（wgpu compute shader、候选批量比对与 CPU 回退）
 - HPSS 源分离与随机森林事件分类（含模型文件格式与 GUI 标签轨道）
 - 检测进度、README 与 GUI 使用文档编写与更新
 

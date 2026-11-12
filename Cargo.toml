@@ -20,6 +20,8 @@ required-features = ["gui"]
 [features]
 cli = ["clap", "indicatif"]
 gui = ["eframe", "egui", "rfd", "pollster", "env_logger", "rodio"]
+# GPU 加速（可选）：使用 wgpu 在显卡上批量计算余弦相似度，未启用时走 CPU
+gpu = ["dep:wgpu", "dep:bytemuck", "pollster"]
 
 [dependencies]
 # FFT 计算
@@ -50,6 +52,10 @@ rfd = { version = "0.14", optional = true }
 pollster = { version = "0.3", optional = true }
 env_logger = { version = "0.11", optional = true }
 rodio = { version = "0.20", optional = true }
+
+# GPU 计算（仅 gpu feature）
+wgpu = { version = "0.20", optional = true }
+bytemuck = { version = "1.16", features = ["derive"], optional = true }
 
 # 序列化（模型持久化）
 serde = { version = "1", features = ["derive"] }

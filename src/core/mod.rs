@@ -6,6 +6,7 @@
 pub mod detect;
 pub mod features;
 pub mod fft;
+pub mod gpu;
 pub mod lsh;
 pub mod range;
 pub mod viterbi;

@@ -162,6 +162,9 @@ fn cmd_detect(files: &[PathBuf], output: Option<&PathBuf>, hpss: bool) -> Result
 
     println!("\n检测结果:");
     println!("============");
+    if let Some(gpu) = &result.gpu {
+        println!("GPU 加速: {}", gpu);
+    }
 
     for (i, (ranges, len)) in result.ranges.iter().zip(result.lengths.iter()).enumerate() {
         let file_name = files[i].file_name().unwrap().to_string_lossy();

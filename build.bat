@@ -9,11 +9,11 @@ cargo build --release --lib
 
 echo.
 echo [2/4] Building CLI...
-cargo build --release --features cli --bin mp3cutad-cli
+cargo build --release --features cli,gpu --bin mp3cutad-cli
 
 echo.
 echo [3/4] Building GUI...
-cargo build --release --features gui --bin mp3cutad-gui
+cargo build --release --features gui,gpu --bin mp3cutad-gui
 
 echo.
 echo [4/4] Copying files...
