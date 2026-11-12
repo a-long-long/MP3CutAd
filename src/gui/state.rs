@@ -16,11 +16,37 @@ pub struct FileInfo {
     pub ad_ranges: Vec<Range>,
     pub detected: bool,
     pub needs_save: bool,
-    /// 被标记删除的广告索引（在有效广告段中的索引）
-    pub marked_for_deletion: Vec<usize>,
     /// 事件分类结果（标签 + 置信度）
     pub event_ranges: Vec<EventRange>,
     pub classified: bool,
+}
+
+/// 按匹配度选择广告段的筛选模式
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MatchMode {
+    /// 高置信度：不低于高阈值
+    High,
+    /// 中等置信度：介于低阈值与高阈值之间
+    Medium,
+    /// 低置信度：低于低阈值
+    Low,
+    /// 自定义下限
+    Custom,
+}
+
+impl MatchMode {
+    /// 判断某个匹配度是否落在当前模式内（未知匹配度不参与）
+    pub fn matches(self, score: f64, min_score: f64, th: Thresholds) -> bool {
+        if score <= 0.0 {
+            return false;
+        }
+        match self {
+            MatchMode::High => score >= th.score_high,
+            MatchMode::Medium => score >= th.score_low && score < th.score_high,
+            MatchMode::Low => score < th.score_low,
+            MatchMode::Custom => score >= min_score,
+        }
+    }
 }
 
 /// 广告段的过滤与展示阈值
@@ -156,6 +182,14 @@ pub struct AppState {
     pub train_export_index: usize,
     /// 最近一次训练的结果摘要
     pub train_report: Option<String>,
+    /// 是否显示按匹配度选择窗口
+    pub show_match_select: bool,
+    /// 按匹配度选择的筛选模式
+    pub match_mode: MatchMode,
+    /// 自定义模式下的匹配度下限
+    pub match_min_score: f64,
+    /// 是否对所有文件生效（否则仅当前文件）
+    pub match_all_files: bool,
 }
 
 impl Default for AppState {
@@ -186,9 +220,43 @@ impl Default for AppState {
             train_test_split: 0.2,
             train_export_index: 0,
             train_report: None,
+            show_match_select: false,
+            match_mode: MatchMode::Low,
+            match_min_score: 0.7,
+            match_all_files: true,
         }
     }
 }
 
 /// 界面各模块共享的状态句柄
 pub type SharedState = Arc<Mutex<AppState>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_mode_classifies_scores() {
+        let th = Thresholds::default();
+        assert!(MatchMode::High.matches(0.9, 0.7, th));
+        assert!(!MatchMode::High.matches(0.7, 0.7, th));
+
+        assert!(MatchMode::Medium.matches(0.7, 0.7, th));
+        assert!(!MatchMode::Medium.matches(0.85, 0.7, th));
+
+        assert!(MatchMode::Low.matches(0.5, 0.7, th));
+        assert!(!MatchMode::Low.matches(0.6, 0.7, th));
+
+        assert!(MatchMode::Custom.matches(0.75, 0.7, th));
+        assert!(!MatchMode::Custom.matches(0.65, 0.7, th));
+    }
+
+    #[test]
+    fn unknown_score_is_never_matched() {
+        let th = Thresholds::default();
+        for mode in [MatchMode::High, MatchMode::Medium, MatchMode::Low] {
+            assert!(!mode.matches(0.0, 0.0, th));
+        }
+        assert!(!MatchMode::Custom.matches(0.0, 0.0, th));
+    }
+}

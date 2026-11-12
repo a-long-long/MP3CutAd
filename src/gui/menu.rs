@@ -78,6 +78,16 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             ui.separator();
 
+            let match_open = state.lock().unwrap().show_match_select;
+            if ui
+                .selectable_label(match_open, "按匹配度选择")
+                .on_hover_text("按高/中/低置信度或自定义下限批量选择广告段")
+                .clicked()
+            {
+                let mut s = state.lock().unwrap();
+                s.show_match_select = !match_open;
+            }
+
             if ui.button("全选广告").clicked() {
                 select_all_ads(state);
             }
@@ -90,11 +100,12 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             let selected_count = state.lock().unwrap().ads_to_delete.len();
             if ui
-                .button(format!("删除已选 ({})", selected_count))
+                .button(format!("删除所选 ({})", selected_count))
+                .on_hover_text("从检测结果中移除选中的广告段，保存时将保留这些片段")
                 .clicked()
                 && selected_count > 0
             {
-                mark_selected_for_deletion(state);
+                delete_selected_ads(state);
             }
 
             {
@@ -299,41 +310,63 @@ fn select_all_ads(state: &SharedState) {
     s.status_message = format!("已全选 {} 个广告段", s.ads_to_delete.len());
 }
 
-fn mark_selected_for_deletion(state: &SharedState) {
+/// 从检测结果中删除选中的广告段（保存时不再裁剪这些片段）
+fn delete_selected_ads(state: &SharedState) {
     let mut s = state.lock().unwrap();
+    let th = s.thresholds;
+    let selected = s.ads_to_delete.clone();
+    if selected.is_empty() {
+        return;
+    }
 
+    // 选中项记录的是“有效广告段”的序号，需要映射回 ad_ranges 的原始下标
     let mut by_file: HashMap<usize, Vec<usize>> = HashMap::new();
-    for &(file_idx, ad_idx) in &s.ads_to_delete {
+    for (file_idx, ad_idx) in selected {
         by_file.entry(file_idx).or_default().push(ad_idx);
     }
 
+    let mut removed = 0usize;
     for (file_idx, ad_indices) in by_file {
-        if let Some(file) = s.files.get_mut(file_idx) {
-            for idx in ad_indices {
-                if !file.marked_for_deletion.contains(&idx) {
-                    file.marked_for_deletion.push(idx);
-                }
+        let Some(file) = s.files.get_mut(file_idx) else {
+            continue;
+        };
+
+        let mut effective_index = 0usize;
+        let mut original_indices = Vec::new();
+        for (orig, r) in file.ad_ranges.iter().enumerate() {
+            if !th.accepts(r) {
+                continue;
             }
-            file.needs_save = true;
+            if ad_indices.contains(&effective_index) {
+                original_indices.push(orig);
+            }
+            effective_index += 1;
         }
+
+        // 从后往前删，避免下标偏移
+        for idx in original_indices.iter().rev() {
+            file.ad_ranges.remove(*idx);
+            removed += 1;
+        }
+        file.needs_save = true;
     }
 
+    // 删除后有效段序号全部变化，清空选择并停止播放
     s.ads_to_delete.clear();
+    *s.playback.stop_flag.lock().unwrap() = true;
+    s.playback.playing_file = None;
+    s.playback.playing_ad = None;
 
-    let th = s.thresholds;
     let remaining: usize = s
         .files
         .iter()
         .filter(|f| f.detected)
-        .map(|f| {
-            f.effective_ad_count(th)
-                .saturating_sub(f.marked_for_deletion.len())
-        })
+        .map(|f| f.effective_ad_count(th))
         .sum();
 
     s.status_message = format!(
-        "已标记删除，剩余 {} 个广告段（点击保存写入文件）",
-        remaining
+        "已从结果中删除 {} 个广告段，剩余 {} 个（保存时保留被删除的片段）",
+        removed, remaining
     );
 }
 

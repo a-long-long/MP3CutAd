@@ -5,6 +5,7 @@
 mod app;
 mod file_list;
 mod fonts;
+mod match_select;
 mod menu;
 mod playback;
 mod results;
