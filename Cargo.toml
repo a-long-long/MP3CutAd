@@ -68,6 +68,14 @@ thiserror = "1.0"
 # FFI 支持
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# 状态栏 CPU / GPU 占用率采样
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 

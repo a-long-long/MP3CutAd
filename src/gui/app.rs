@@ -3,11 +3,12 @@
 use eframe::egui;
 
 use super::state::SharedState;
-use super::{file_list, fonts, match_select, menu, results, settings, train};
+use super::{file_list, fonts, match_select, menu, results, settings, sysmon, train};
 
 /// 主应用
 struct Mp3CutAdApp {
     state: SharedState,
+    monitor: sysmon::SysMonitor,
 }
 
 impl Mp3CutAdApp {
@@ -15,14 +16,16 @@ impl Mp3CutAdApp {
         cc.egui_ctx.set_visuals(egui::Visuals::light());
         Self {
             state: Default::default(),
+            monitor: sysmon::SysMonitor::new(),
         }
     }
 }
 
 impl eframe::App for Mp3CutAdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.monitor.sample();
         menu::menu_bar(ctx, &self.state);
-        menu::status_bar(ctx, &self.state);
+        menu::status_bar(ctx, &self.state, self.monitor.snapshot());
         file_list::show(ctx, &self.state);
         results::show(ctx, &self.state);
         settings::show(ctx, &self.state);
@@ -36,6 +39,9 @@ impl eframe::App for Mp3CutAdApp {
         };
         if needs_repaint {
             ctx.request_repaint();
+        } else {
+            // 状态栏的 CPU / GPU 占用率每秒刷新一次
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
 }

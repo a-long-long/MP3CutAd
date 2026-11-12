@@ -13,6 +13,7 @@ mod save;
 mod settings;
 mod spectrogram;
 mod state;
+mod sysmon;
 mod train;
 
 pub use app::run;

@@ -2559,6 +2559,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "wgpu",
+ "windows-sys 0.52.0",
  "winres",
 ]
 

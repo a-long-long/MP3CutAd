@@ -154,7 +154,7 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 }
 
 /// 底部状态栏
-pub fn status_bar(ctx: &Context, state: &SharedState) {
+pub fn status_bar(ctx: &Context, state: &SharedState, sys: super::sysmon::Snapshot) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let s = state.lock().unwrap();
@@ -171,6 +171,22 @@ pub fn status_bar(ctx: &Context, state: &SharedState) {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // 从右向左添加：GPU、CPU 位于最右侧
+                match (sys.gpu, sys.cpu) {
+                    (Some(gpu), Some(cpu)) => {
+                        ui.label(format!("GPU {:.0}%", gpu));
+                        ui.separator();
+                        ui.label(format!("CPU {:.0}%", cpu));
+                    }
+                    (Some(gpu), None) => {
+                        ui.label(format!("GPU {:.0}%", gpu));
+                    }
+                    (None, Some(cpu)) => {
+                        ui.label(format!("CPU {:.0}%", cpu));
+                    }
+                    (None, None) => {}
+                }
+                ui.separator();
                 ui.label(format!("文件数: {}", s.files.len()));
                 ui.separator();
                 let min_len = if s.thresholds.min_length_sec > 0 {
