@@ -41,15 +41,27 @@ pub fn show(ctx: &Context, state: &SharedState) {
                         .changed();
                     ui.end_row();
 
+                    ui.label("极高置信度阈值");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut th.score_top)
+                                .range(th.score_high..=1.0)
+                                .speed(0.01)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text("匹配度不低于此值显示为深红色")
+                        .changed();
+                    ui.end_row();
+
                     ui.label("高置信度阈值");
                     changed |= ui
                         .add(
                             egui::DragValue::new(&mut th.score_high)
-                                .range(th.score_low..=1.0)
+                                .range(th.score_low..=th.score_top)
                                 .speed(0.01)
                                 .fixed_decimals(2),
                         )
-                        .on_hover_text("匹配度不低于此值显示为红色")
+                        .on_hover_text("匹配度不低于此值显示为红色，达到极高阈值显示为深红")
                         .changed();
                     ui.end_row();
 

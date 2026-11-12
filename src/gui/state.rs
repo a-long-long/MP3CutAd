@@ -26,7 +26,9 @@ pub struct FileInfo {
 /// 按匹配度选择广告段的筛选模式
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MatchMode {
-    /// 高置信度：不低于高阈值
+    /// 极高置信度：不低于极高阈值
+    VeryHigh,
+    /// 高置信度：介于高阈值与极高阈值之间
     High,
     /// 中等置信度：介于低阈值与高阈值之间
     Medium,
@@ -43,7 +45,8 @@ impl MatchMode {
             return false;
         }
         match self {
-            MatchMode::High => score >= th.score_high,
+            MatchMode::VeryHigh => score >= th.score_top,
+            MatchMode::High => score >= th.score_high && score < th.score_top,
             MatchMode::Medium => score >= th.score_low && score < th.score_high,
             MatchMode::Low => score < th.score_low,
             MatchMode::Custom => score >= min_score,
@@ -58,6 +61,8 @@ pub struct Thresholds {
     pub min_length_sec: i32,
     /// 最小出现次数
     pub min_count: i32,
+    /// 极高匹配度阈值
+    pub score_top: f64,
     /// 高匹配度阈值
     pub score_high: f64,
     /// 低匹配度阈值
@@ -69,6 +74,7 @@ impl Default for Thresholds {
         Self {
             min_length_sec: 0,
             min_count: 2,
+            score_top: 0.9,
             score_high: 0.8,
             score_low: 0.6,
         }
@@ -276,7 +282,13 @@ mod tests {
     #[test]
     fn match_mode_classifies_scores() {
         let th = Thresholds::default();
-        assert!(MatchMode::High.matches(0.9, 0.7, th));
+
+        assert!(MatchMode::VeryHigh.matches(0.95, 0.7, th));
+        assert!(MatchMode::VeryHigh.matches(0.9, 0.7, th));
+        assert!(!MatchMode::VeryHigh.matches(0.89, 0.7, th));
+
+        assert!(MatchMode::High.matches(0.85, 0.7, th));
+        assert!(!MatchMode::High.matches(0.95, 0.7, th));
         assert!(!MatchMode::High.matches(0.7, 0.7, th));
 
         assert!(MatchMode::Medium.matches(0.7, 0.7, th));
@@ -292,7 +304,12 @@ mod tests {
     #[test]
     fn unknown_score_is_never_matched() {
         let th = Thresholds::default();
-        for mode in [MatchMode::High, MatchMode::Medium, MatchMode::Low] {
+        for mode in [
+            MatchMode::VeryHigh,
+            MatchMode::High,
+            MatchMode::Medium,
+            MatchMode::Low,
+        ] {
             assert!(!mode.matches(0.0, 0.0, th));
         }
         assert!(!MatchMode::Custom.matches(0.0, 0.0, th));

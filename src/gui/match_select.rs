@@ -50,8 +50,17 @@ fn select_ui(ui: &mut egui::Ui, state: &SharedState) {
     ui.label("匹配度范围");
     ui.radio_value(
         &mut mode,
+        MatchMode::VeryHigh,
+        format!("极高置信度（≥ {:.0}%）", th.score_top * 100.0),
+    );
+    ui.radio_value(
+        &mut mode,
         MatchMode::High,
-        format!("高置信度（≥ {:.0}%）", th.score_high * 100.0),
+        format!(
+            "高置信度（{:.0}% – {:.0}%）",
+            th.score_high * 100.0,
+            th.score_top * 100.0
+        ),
     );
     ui.radio_value(
         &mut mode,

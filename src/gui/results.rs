@@ -507,7 +507,7 @@ fn average_score(file: &FileInfo, thresholds: crate::gui::state::Thresholds) -> 
     }
 }
 
-/// 按匹配度着色：高=红，中=橙，低=黄；未知（0）沿用原配色
+/// 按匹配度着色：极高=深红，高=红，中=橙，低=黄；未知（0）沿用原配色
 fn confidence_color(
     score: f64,
     fallback: egui::Color32,
@@ -515,6 +515,8 @@ fn confidence_color(
 ) -> egui::Color32 {
     if score <= 0.0 {
         fallback
+    } else if score >= thresholds.score_top {
+        egui::Color32::from_rgb(160, 24, 44)
     } else if score >= thresholds.score_high {
         egui::Color32::from_rgb(200, 80, 80)
     } else if score >= thresholds.score_low {
@@ -526,19 +528,20 @@ fn confidence_color(
 
 /// 匹配度配色图例（随阈值设置变化）
 fn confidence_legend(ui: &mut egui::Ui, thresholds: crate::gui::state::Thresholds) {
+    let top = thresholds.score_top;
     let high = thresholds.score_high;
     let low = thresholds.score_low;
     let items = [
         (
-            format!("≥{:.0}%", high * 100.0),
-            confidence_color(high, egui::Color32::WHITE, thresholds),
+            format!("≥{:.0}%", top * 100.0),
+            confidence_color(top, egui::Color32::WHITE, thresholds),
         ),
         (
-            format!(
-                "{:.0}-{:.0}%",
-                low * 100.0,
-                high * 100.0
-            ),
+            format!("{:.0}-{:.0}%", high * 100.0, top * 100.0),
+            confidence_color((high + top) / 2.0, egui::Color32::WHITE, thresholds),
+        ),
+        (
+            format!("{:.0}-{:.0}%", low * 100.0, high * 100.0),
             confidence_color((low + high) / 2.0, egui::Color32::WHITE, thresholds),
         ),
         (
