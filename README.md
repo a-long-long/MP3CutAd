@@ -429,6 +429,14 @@ src/
 │   └── fonts.rs      # 中文字体
 └── ffi.rs            # C ABI 接口
 
+assets/
+├── icon.ico          # 可执行文件图标（build.rs 打包进 exe）
+├── icon.png          # 图标源图（256×256）
+├── icon_64.rgba      # 窗口/任务栏图标（64×64 原始像素）
+└── fonts/            # 界面内嵌中文字体
+
+build.rs              # Windows 资源：exe 图标与版本信息
+
 docs/
 └── gui-usage.md      # 图形界面完整使用说明
 ```

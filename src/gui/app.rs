@@ -40,14 +40,24 @@ impl eframe::App for Mp3CutAdApp {
     }
 }
 
+/// 窗口/任务栏图标（64×64 RGBA，由 assets/icon.png 生成）
+const WINDOW_ICON: &[u8] = include_bytes!("../../assets/icon_64.rgba");
+
 /// 启动 GUI
 pub fn run() -> eframe::Result<()> {
     env_logger::init();
+
+    let icon = egui::IconData {
+        rgba: WINDOW_ICON.to_vec(),
+        width: 64,
+        height: 64,
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 600.0])
             .with_min_inner_size([800.0, 400.0])
+            .with_icon(std::sync::Arc::new(icon))
             .with_title("MP3CutAd-RS - MP3 广告检测与裁剪"),
         // 强制使用 OpenGL/Glow 渲染后端：
         // 默认 wgpu 优先走 Vulkan，在缺少 Vulkan 驱动的环境（如部分 ARM/虚拟显示）
