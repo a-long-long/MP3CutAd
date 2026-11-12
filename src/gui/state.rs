@@ -16,6 +16,8 @@ pub struct FileInfo {
     pub ad_ranges: Vec<Range>,
     pub detected: bool,
     pub needs_save: bool,
+    /// 被标记删除的广告索引（在有效广告段中的索引）
+    pub marked_for_deletion: Vec<usize>,
     /// 事件分类结果（标签 + 置信度）
     pub event_ranges: Vec<EventRange>,
     pub classified: bool,
@@ -112,11 +114,6 @@ impl FileInfo {
     /// 满足阈值的广告段数量
     pub fn effective_ad_count(&self, th: Thresholds) -> usize {
         self.effective_ads(th).count()
-    }
-
-    /// 是否包含满足阈值的广告段
-    pub fn has_effective_ads(&self, th: Thresholds) -> bool {
-        self.effective_ads(th).next().is_some()
     }
 }
 

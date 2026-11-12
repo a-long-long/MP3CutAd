@@ -39,8 +39,8 @@ fn select_ui(ui: &mut egui::Ui, state: &SharedState) {
 
     ui.label(
         egui::RichText::new(
-            "按匹配度筛选广告段。选中的段可用工具栏「删除所选」从结果中移除，\
-             保存时将保留这些片段；未知匹配度（旧版结果）不参与筛选。",
+            "按匹配度筛选广告段。选中的段可用工具栏「删除所选」标记，\
+             点击保存后才会从音频中删除并拼接前后内容；未知匹配度（旧版结果）不参与筛选。",
         )
         .small()
         .color(egui::Color32::from_gray(150)),

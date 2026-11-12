@@ -43,7 +43,15 @@ pub fn show(ctx: &Context, state: &SharedState) {
 
                             if file.detected {
                                 ui.indent("ads", |ui| {
-                                    ui.label(format!("广告: {} 个", file.ad_ranges.len()));
+                                    if file.marked_for_deletion.is_empty() {
+                                        ui.label(format!("广告: {} 个", file.ad_ranges.len()));
+                                    } else {
+                                        ui.label(format!(
+                                            "广告: {} 个（已标记删除 {}）",
+                                            file.ad_ranges.len(),
+                                            file.marked_for_deletion.len()
+                                        ));
+                                    }
                                 });
                             }
                         })

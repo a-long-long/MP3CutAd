@@ -83,8 +83,11 @@ pub fn show(ctx: &Context, state: &SharedState) {
     if changed {
         let mut s = state.lock().unwrap();
         s.thresholds = th;
-        // 阈值变化会改变有效广告段的数量与序号，清空旧选择避免错位
+        // 阈值变化会改变有效广告段的数量与序号，清空旧选择与标记避免错位
         s.ads_to_delete.clear();
+        for f in &mut s.files {
+            f.marked_for_deletion.clear();
+        }
     }
     if !open {
         state.lock().unwrap().show_settings = false;

@@ -142,17 +142,20 @@ fn draw_file_track(
         file.effective_ads(thresholds).collect();
     let event_ranges = &file.event_ranges;
 
-    // 剩余时长按实际会被裁剪的段计算，与保存结果保持一致
-    let remaining_duration = if !effective_ads.is_empty() {
-        let effective_owned: Vec<crate::core::range::Range> =
-            effective_ads.iter().map(|r| **r).collect();
-        let remaining_segments = reverse_range(&effective_owned, file.length);
+    // 剩余时长按实际会被裁剪的段（已标记删除）计算，与保存结果保持一致
+    let marked_owned: Vec<crate::core::range::Range> = file
+        .marked_for_deletion
+        .iter()
+        .filter_map(|&idx| effective_ads.get(idx).copied().copied())
+        .collect();
+    let remaining_duration = if marked_owned.is_empty() {
+        file.length as f64 / 10.0
+    } else {
+        let remaining_segments = reverse_range(&marked_owned, file.length);
         remaining_segments
             .iter()
             .map(|r| (r.end - r.begin) as f64 / 10.0)
             .sum()
-    } else {
-        file.length as f64 / 10.0
     };
     let avg_score = average_score(file, thresholds);
 
@@ -170,7 +173,12 @@ fn draw_file_track(
             "  原始: {:.1}s", orig_dur
         );
         if !effective_ads.is_empty() {
-            summary.push_str(&format!(" | 剩余: {:.1}s | {} 广告段", remaining_duration, effective_ads.len()));
+            summary.push_str(&format!(
+                " | 剩余: {:.1}s | {} 广告段（已标记删除 {}）",
+                remaining_duration,
+                effective_ads.len(),
+                file.marked_for_deletion.len()
+            ));
         }
         if !event_ranges.is_empty() {
             summary.push_str(&format!(" | {} 事件", event_ranges.len()));
@@ -234,6 +242,25 @@ fn draw_file_track(
                 2.0,
                 egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
             );
+
+            // 已标记删除的段：压暗并画红色斜线
+            let marked = file.marked_for_deletion.contains(&ai);
+            if marked {
+                painter.rect_filled(
+                    ad_rect,
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 120),
+                );
+                painter.rect_stroke(
+                    ad_rect,
+                    2.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(230, 60, 60)),
+                );
+                painter.line_segment(
+                    [ad_rect.left_bottom(), ad_rect.right_top()],
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(230, 60, 60)),
+                );
+            }
 
             // 已选中的段加黄色边框
             if selected_ads.contains(&ai) {
