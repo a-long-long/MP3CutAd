@@ -1,5 +1,5 @@
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use crate::audio::{cache, ffmpeg};
 use crate::core::fft::read_wav_samples;
@@ -28,6 +28,9 @@ impl Default for ClassifyOptions {
 pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptions) -> Result<Vec<EventRange>> {
     let ws = (model.window_sec * SEG_SR as f64) as usize;
     let hs = (model.hop_sec * SEG_SR as f64) as usize;
+    if hs == 0 {
+        bail!("hop_sec * 采样率取整为 0，无法滑动（模型 hop_sec={}）", model.hop_sec);
+    }
     if samples.len() < ws { return Ok(Vec::new()); }
     let nw = (samples.len() - ws) / hs + 1;
     let mut fp: Vec<Option<(usize, f64)>> = Vec::with_capacity(nw);
@@ -72,7 +75,7 @@ pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptio
                     _ => {
                         if let Some((c, sw, ew, confs)) = cur.take() {
                             let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-                            merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+                            merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
                         }
                         cur = Some((*cls, i, i, vec![*conf]));
                     }
@@ -81,14 +84,14 @@ pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptio
             None => {
                 if let Some((c, sw, ew, confs)) = cur.take() {
                     let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-                    merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+                    merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
                 }
             }
         }
     }
     if let Some((c, sw, ew, confs)) = cur.take() {
         let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-        merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+        merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
     }
     Ok(merged.into_iter().filter(|(_, b, e, _)| e - b >= opts.min_event_len)
         .map(|(cls, b, e, conf)| EventRange { begin: b, end: e, label: model.labels.get(cls).cloned().unwrap_or_else(|| format!("类{}", cls)), confidence: conf })

@@ -37,7 +37,15 @@ pub(crate) fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
     let spec = reader.spec();
     let samples: Vec<f64> = match spec.sample_format {
         hound::SampleFormat::Int => {
-            let max_val = (1i64 << (spec.bits_per_sample - 1)) as f64;
+            // bits_per_sample 合法范围校验，防 0 或异常值导致移位溢出
+            let bits = spec.bits_per_sample;
+            if bits == 0 || bits > 64 {
+                anyhow::bail!(
+                    "不支持的 WAV 位深 bits_per_sample={}（期望 8/16/24/32）",
+                    bits
+                );
+            }
+            let max_val = (1i64 << (bits - 1)) as f64;
             reader
                 .samples::<i32>()
                 .map(|s| s.map(|v| v as f64 / max_val))
@@ -49,10 +57,11 @@ pub(crate) fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // 如果是立体声，取单声道
-    if spec.channels == 2 {
+    // 如果是立体声，取单声道。用 chunks_exact 丢弃奇数采样的尾部残缺，
+    // 避免 chunks(2) 静默丢失或 chunk[1] 越界。
+    if spec.channels >= 2 {
         Ok(samples
-            .chunks(2)
+            .chunks_exact(2)
             .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
             .collect())
     } else {

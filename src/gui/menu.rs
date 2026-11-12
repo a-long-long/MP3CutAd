@@ -1,6 +1,7 @@
 //! 顶部工具栏与底部状态栏
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -21,11 +22,13 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
             ui.heading("MP3CutAd-RS");
             ui.separator();
 
-            if ui.button("添加文件").clicked() {
+            let is_processing = state.lock().unwrap().is_processing;
+
+            if ui.button("添加文件").clicked() && !is_processing {
                 add_files(state);
             }
 
-            if ui.button("添加目录").clicked() {
+            if ui.button("添加目录").clicked() && !is_processing {
                 add_directory(state);
             }
 
@@ -115,10 +118,10 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             let files_to_save = {
                 let s = state.lock().unwrap();
-                let th = s.thresholds;
+                // 与 save.rs 一致：只有被「删除已选」标记过的文件才会被保存
                 s.files
                     .iter()
-                    .filter(|f| f.detected && f.has_effective_ads(th))
+                    .filter(|f| f.detected && !f.marked_for_deletion.is_empty())
                     .count()
             };
 
@@ -135,7 +138,8 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             ui.separator();
 
-            if ui.button("清空列表").clicked() {
+            let is_processing = state.lock().unwrap().is_processing;
+            if ui.button("清空列表").clicked() && !is_processing {
                 let mut s = state.lock().unwrap();
                 s.files.clear();
                 s.selected_file = None;
@@ -244,31 +248,35 @@ fn start_detection(state: &SharedState) {
     }
 
     thread::spawn(move || {
-        let (files, enable_hpss): (Vec<std::path::PathBuf>, bool) = {
-            let s = state.lock().unwrap();
-            (
-                s.files.iter().map(|f| f.path.clone()).collect(),
-                s.enable_hpss,
-            )
-        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let (files, enable_hpss): (Vec<std::path::PathBuf>, bool) = {
+                let s = state.lock().unwrap();
+                (
+                    s.files.iter().map(|f| f.path.clone()).collect(),
+                    s.enable_hpss,
+                )
+            };
 
-        let opts = if enable_hpss {
-            DetectOptions::default().with_hpss()
-        } else {
-            DetectOptions::default()
-        };
+            let opts = if enable_hpss {
+                DetectOptions::default().with_hpss()
+            } else {
+                DetectOptions::default()
+            };
 
-        // 进度回调：实时更新进度条与状态文本（可能来自并行线程）
-        let progress_state = state.clone();
-        let on_progress = move |progress: f32, message: &str| {
-            if let Ok(mut s) = progress_state.lock() {
-                s.progress = progress;
-                s.status_message = message.to_string();
-            }
-        };
+            // 进度回调：实时更新进度条与状态文本（可能来自并行线程）
+            let progress_state = state.clone();
+            let on_progress = move |progress: f32, message: &str| {
+                if let Ok(mut s) = progress_state.lock() {
+                    s.progress = progress;
+                    s.status_message = message.to_string();
+                }
+            };
 
-        match detect_ad_with_progress(&files, opts, on_progress) {
-            Ok(result) => {
+            detect_ad_with_progress(&files, opts, on_progress)
+        }));
+
+        match result {
+            Ok(Ok(result)) => {
                 let mut s = state.lock().unwrap();
                 for (i, (ranges, length)) in
                     result.ranges.into_iter().zip(result.lengths).enumerate()
@@ -284,10 +292,15 @@ fn start_detection(state: &SharedState) {
                 s.progress = 1.0;
                 s.status_message = "检测完成！".to_string();
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let mut s = state.lock().unwrap();
                 s.is_processing = false;
                 s.status_message = format!("检测失败: {}", e);
+            }
+            Err(_) => {
+                let mut s = state.lock().unwrap();
+                s.is_processing = false;
+                s.status_message = "检测线程发生 panic（已恢复）".to_string();
             }
         }
     });
@@ -439,53 +452,65 @@ fn start_classification(state: &SharedState) {
     let n_files = files.len();
     let model = Arc::new(model);
     thread::spawn(move || {
-        let mut all_events: Vec<(Vec<EventRange>, usize)> = Vec::with_capacity(n_files);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut all_events: Vec<(Vec<EventRange>, usize)> = Vec::with_capacity(n_files);
 
-        for (i, path) in files.iter().enumerate() {
-            let progress_state = state.clone();
-            let on_progress = move |p: f32, msg: &str| {
-                let total_p = (i as f32 + p / n_files as f32) / n_files.max(1) as f32;
-                if let Ok(mut s) = progress_state.lock() {
-                    s.progress = total_p;
-                    s.status_message = format!("[{}/{}] {}", i + 1, n_files, msg);
-                }
-            };
-
-            let events = match crate::core::classify::classify_file_with_progress(
-                path,
-                &model,
-                &opts,
-                on_progress,
-            ) {
-                Ok((ev, _nf)) => ev,
-                Err(e) => {
-                    if let Ok(mut s) = state.lock() {
-                        s.status_message = format!(
-                            "分类失败 {}: {}",
-                            path.file_name()
-                                .map(|n| n.to_string_lossy())
-                                .unwrap_or_default(),
-                            e
-                        );
+            for (i, path) in files.iter().enumerate() {
+                let progress_state = state.clone();
+                let on_progress = move |p: f32, msg: &str| {
+                    let total_p = (i as f32 + p / n_files as f32) / n_files.max(1) as f32;
+                    if let Ok(mut s) = progress_state.lock() {
+                        s.progress = total_p;
+                        s.status_message = format!("[{}/{}] {}", i + 1, n_files, msg);
                     }
-                    Vec::new()
-                }
-            };
-            all_events.push((events, i));
-        }
+                };
 
-        // 写回结果
-        let mut s = state.lock().unwrap();
-        let mut total_events = 0;
-        for (events, idx) in all_events {
-            if let Some(f) = s.files.get_mut(idx) {
-                f.event_ranges = events.clone();
-                f.classified = true;
-                total_events += events.len();
+                let events = match crate::core::classify::classify_file_with_progress(
+                    path,
+                    &model,
+                    &opts,
+                    on_progress,
+                ) {
+                    Ok((ev, _nf)) => ev,
+                    Err(e) => {
+                        if let Ok(mut s) = state.lock() {
+                            s.status_message = format!(
+                                "分类失败 {}: {}",
+                                path.file_name()
+                                    .map(|n| n.to_string_lossy())
+                                    .unwrap_or_default(),
+                                e
+                            );
+                        }
+                        Vec::new()
+                    }
+                };
+                all_events.push((events, i));
+            }
+            all_events
+        }));
+
+        match result {
+            Ok(all_events) => {
+                // 写回结果
+                let mut s = state.lock().unwrap();
+                let mut total_events = 0;
+                for (events, idx) in all_events {
+                    if let Some(f) = s.files.get_mut(idx) {
+                        f.event_ranges = events.clone();
+                        f.classified = true;
+                        total_events += events.len();
+                    }
+                }
+                s.is_processing = false;
+                s.progress = 1.0;
+                s.status_message = format!("分类完成！共检测到 {} 个事件", total_events);
+            }
+            Err(_) => {
+                let mut s = state.lock().unwrap();
+                s.is_processing = false;
+                s.status_message = "分类线程发生 panic（已恢复）".to_string();
             }
         }
-        s.is_processing = false;
-        s.progress = 1.0;
-        s.status_message = format!("分类完成！共检测到 {} 个事件", total_events);
     });
 }

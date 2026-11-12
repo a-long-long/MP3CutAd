@@ -7,11 +7,17 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::slice;
+use std::panic::AssertUnwindSafe;
 
 use crate::audio::ffmpeg;
 use crate::core::detect;
 use crate::core::range::Range;
 use crate::pipeline;
+
+/// 构造错误 C 字符串（统一入口，避免 unwrap panic）
+fn error_cstring(msg: impl Into<String>) -> *mut c_char {
+    CString::new(msg.into()).unwrap_or_else(|_| CString::new("internal error").unwrap()).into_raw()
+}
 
 /// 检测结果结构（C 兼容）
 #[repr(C)]
@@ -62,75 +68,137 @@ pub unsafe extern "C" fn mp3cutad_detect(
     _progress_cb: Option<ProgressCallback>,
     _user_data: *mut c_void,
 ) -> *mut CDetectionResult {
-    // 解析文件路径
-    let files_slice = slice::from_raw_parts(files_ptr, files_count as usize);
-    let files: Vec<PathBuf> = files_slice
-        .iter()
-        .filter_map(|&p| {
-            if p.is_null() {
-                None
-            } else {
-                CStr::from_ptr(p).to_str().ok().map(PathBuf::from)
-            }
-        })
-        .collect();
+    // 入参校验：负数 count / 空指针防御
+    if files_count < 0 || (files_count > 0 && files_ptr.is_null()) {
+        let result_box = Box::new(CDetectionResult {
+            file_count: 0,
+            range_counts: std::ptr::null_mut(),
+            ranges: std::ptr::null_mut(),
+            lengths: std::ptr::null_mut(),
+            error: error_cstring("invalid argument: files_count negative or null pointer"),
+        });
+        return Box::into_raw(result_box);
+    }
 
-    // 执行检测
-    let result = detect::detect_ad(&files);
-
-    // 分配结果结构
-    let result_box = Box::new(match result {
-        Ok(det_result) => {
-            let file_count = det_result.ranges.len() as c_int;
-
-            // 分配区间计数数组
-            let range_counts =
-                libc::malloc(file_count as usize * std::mem::size_of::<c_int>()) as *mut c_int;
-            for (i, ranges) in det_result.ranges.iter().enumerate() {
-                *range_counts.add(i) = ranges.len() as c_int;
-            }
-
-            // 计算总区间数
-            let total_ranges: usize = det_result.ranges.iter().map(|r| r.len()).sum();
-
-            // 分配区间数组
-            let ranges_ptr =
-                libc::malloc(total_ranges * std::mem::size_of::<CRange>()) as *mut CRange;
-            let mut idx = 0;
-            for ranges in &det_result.ranges {
-                for r in ranges {
-                    *ranges_ptr.add(idx) = (*r).into();
-                    idx += 1;
+    // catch_unwind：任何内部 panic 都不能越过 extern "C" 边界（UB）
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let files_slice = if files_count == 0 {
+            &[] as &[*const c_char]
+        } else {
+            slice::from_raw_parts(files_ptr, files_count as usize)
+        };
+        let files: Vec<PathBuf> = files_slice
+            .iter()
+            .filter_map(|&p| {
+                if p.is_null() {
+                    None
+                } else {
+                    CStr::from_ptr(p).to_str().ok().map(PathBuf::from)
                 }
-            }
+            })
+            .collect();
 
-            // 分配长度数组
-            let lengths =
-                libc::malloc(file_count as usize * std::mem::size_of::<c_int>()) as *mut c_int;
-            for (i, &len) in det_result.lengths.iter().enumerate() {
-                *lengths.add(i) = len as c_int;
-            }
-
-            CDetectionResult {
-                file_count,
-                range_counts,
-                ranges: ranges_ptr,
-                lengths,
-                error: std::ptr::null_mut(),
-            }
+        match detect::detect_ad(&files) {
+            Ok(d) => Ok(d),
+            Err(e) => Err(format!("{}", e)),
         }
-        Err(e) => {
-            let error_msg = CString::new(format!("{}", e)).unwrap_or_default();
-            CDetectionResult {
+    }));
+
+    let det_result = match result {
+        Ok(Ok(d)) => d,
+        Ok(Err(e)) => {
+            let result_box = Box::new(CDetectionResult {
                 file_count: 0,
                 range_counts: std::ptr::null_mut(),
                 ranges: std::ptr::null_mut(),
                 lengths: std::ptr::null_mut(),
-                error: error_msg.into_raw(),
-            }
+                error: error_cstring(format!("detect error: {}", e)),
+            });
+            return Box::into_raw(result_box);
         }
-    });
+        Err(_) => {
+            let result_box = Box::new(CDetectionResult {
+                file_count: 0,
+                range_counts: std::ptr::null_mut(),
+                ranges: std::ptr::null_mut(),
+                lengths: std::ptr::null_mut(),
+                error: error_cstring("panic in mp3cutad_detect (caught)"),
+            });
+            return Box::into_raw(result_box);
+        }
+    };
 
+    let file_count = det_result.ranges.len() as c_int;
+
+    // malloc 判空：分配失败直接返回错误结果
+    let range_counts = libc::malloc(file_count as usize * std::mem::size_of::<c_int>()) as *mut c_int;
+    if file_count > 0 && range_counts.is_null() {
+        let result_box = Box::new(CDetectionResult {
+            file_count: 0,
+            range_counts: std::ptr::null_mut(),
+            ranges: std::ptr::null_mut(),
+            lengths: std::ptr::null_mut(),
+            error: error_cstring("out of memory"),
+        });
+        return Box::into_raw(result_box);
+    }
+    for (i, ranges) in det_result.ranges.iter().enumerate() {
+        *range_counts.add(i) = ranges.len() as c_int;
+    }
+
+    let total_ranges: usize = det_result.ranges.iter().map(|r| r.len()).sum();
+    let ranges_ptr = if total_ranges > 0 {
+        libc::malloc(total_ranges * std::mem::size_of::<CRange>()) as *mut CRange
+    } else {
+        std::ptr::null_mut()
+    };
+    if total_ranges > 0 && ranges_ptr.is_null() {
+        libc::free(range_counts as *mut c_void);
+        let result_box = Box::new(CDetectionResult {
+            file_count: 0,
+            range_counts: std::ptr::null_mut(),
+            ranges: std::ptr::null_mut(),
+            lengths: std::ptr::null_mut(),
+            error: error_cstring("out of memory"),
+        });
+        return Box::into_raw(result_box);
+    }
+    let mut idx = 0;
+    for ranges in &det_result.ranges {
+        for r in ranges {
+            if !ranges_ptr.is_null() {
+                *ranges_ptr.add(idx) = (*r).into();
+            }
+            idx += 1;
+        }
+    }
+
+    let lengths = libc::malloc(file_count as usize * std::mem::size_of::<c_int>()) as *mut c_int;
+    if file_count > 0 && lengths.is_null() {
+        libc::free(range_counts as *mut c_void);
+        if !ranges_ptr.is_null() {
+            libc::free(ranges_ptr as *mut c_void);
+        }
+        let result_box = Box::new(CDetectionResult {
+            file_count: 0,
+            range_counts: std::ptr::null_mut(),
+            ranges: std::ptr::null_mut(),
+            lengths: std::ptr::null_mut(),
+            error: error_cstring("out of memory"),
+        });
+        return Box::into_raw(result_box);
+    }
+    for (i, &len) in det_result.lengths.iter().enumerate() {
+        *lengths.add(i) = len as c_int;
+    }
+
+    let result_box = Box::new(CDetectionResult {
+        file_count,
+        range_counts,
+        ranges: ranges_ptr,
+        lengths,
+        error: std::ptr::null_mut(),
+    });
     Box::into_raw(result_box)
 }
 
@@ -146,30 +214,48 @@ pub unsafe extern "C" fn mp3cutad_cut(
     ranges_count: c_int,
     total_length: c_int,
 ) -> *mut c_char {
-    let input_path = match CStr::from_ptr(input_file).to_str() {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => return CString::new("Invalid input file path").unwrap().into_raw(),
-    };
+    // 入参校验：负 count / 负 total_length / 必要空指针
+    if ranges_count < 0 || total_length < 0 {
+        return error_cstring("invalid argument: negative ranges_count or total_length");
+    }
+    if input_file.is_null() || output_file.is_null() {
+        return error_cstring("invalid argument: null input/output path");
+    }
+    if ranges_count > 0 && ranges_ptr.is_null() {
+        return error_cstring("invalid argument: null ranges_ptr with positive ranges_count");
+    }
 
-    let output_path = match CStr::from_ptr(output_file).to_str() {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => return CString::new("Invalid output file path").unwrap().into_raw(),
-    };
+    // catch_unwind：任何内部 panic 都不能越过 extern "C" 边界（UB）
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<*mut c_char, String> {
+        let input_path = CStr::from_ptr(input_file)
+            .to_str()
+            .map(PathBuf::from)
+            .map_err(|e| format!("invalid input path: {}", e))?;
+        let output_path = CStr::from_ptr(output_file)
+            .to_str()
+            .map(PathBuf::from)
+            .map_err(|e| format!("invalid output path: {}", e))?;
 
-    // 转换区间
-    let ranges_slice = slice::from_raw_parts(ranges_ptr, ranges_count as usize);
-    let ad_ranges: Vec<Range> = ranges_slice
-        .iter()
-        .map(|r| Range::new(r.begin, r.end, r.count))
-        .collect();
+        let ad_ranges: Vec<Range> = if ranges_count > 0 {
+            let slice = slice::from_raw_parts(ranges_ptr, ranges_count as usize);
+            slice
+                .iter()
+                .map(|r| Range::new(r.begin, r.end, r.count))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-    // 获取要保留的区间（反转广告区间）
-    let segments = pipeline::keep_segments(&ad_ranges, total_length as usize);
+        let segments = pipeline::keep_segments(&ad_ranges, total_length as usize);
+        ffmpeg::cut_and_combine(&input_path, &output_path, &segments)
+            .map(|_| std::ptr::null_mut())
+            .map_err(|e| format!("{}", e))
+    }));
 
-    // 执行裁剪
-    match ffmpeg::cut_and_combine(&input_path, &output_path, &segments) {
-        Ok(_) => std::ptr::null_mut(),
-        Err(e) => CString::new(format!("{}", e)).unwrap().into_raw(),
+    match result {
+        Ok(Ok(ptr)) => ptr,
+        Ok(Err(e)) => error_cstring(format!("{}", e)),
+        Err(_) => error_cstring("panic in mp3cutad_cut (caught)"),
     }
 }
 

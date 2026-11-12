@@ -1,5 +1,6 @@
 //! 保存（按广告区间裁剪写盘）流程
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::thread;
 
@@ -11,7 +12,11 @@ use super::state::{AppState, FileInfo, SharedState};
 /// 启动保存：在后台线程中裁剪所有含有效广告段的文件
 pub fn start_save(state: &SharedState) {
     let state = state.clone();
-    thread::spawn(move || save_all(&state));
+    thread::spawn(move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            save_all(&state);
+        }));
+    });
 }
 
 fn save_all(state: &SharedState) {
@@ -32,10 +37,11 @@ fn save_all(state: &SharedState) {
         return;
     }
 
+    // 只处理用户通过「删除已选」标记过的文件（未标记的文件不动）
     let targets: Vec<(usize, FileInfo)> = files
         .into_iter()
         .enumerate()
-        .filter(|(_, f)| f.detected && f.has_effective_ads(thresholds))
+        .filter(|(_, f)| f.detected && !f.marked_for_deletion.is_empty())
         .collect();
 
     if targets.is_empty() {
@@ -50,6 +56,19 @@ fn save_all(state: &SharedState) {
         s.status_message = format!("正在保存... 共 {} 个文件", total);
     }
 
+    // drop guard：无论 save_all 正常返回还是 panic，都保证 is_processing 复位
+    struct ProcessGuard<'a> {
+        state: &'a SharedState,
+    }
+    impl<'a> Drop for ProcessGuard<'a> {
+        fn drop(&mut self) {
+            if let Ok(mut s) = self.state.lock() {
+                s.is_processing = false;
+            }
+        }
+    }
+    let _guard = ProcessGuard { state };
+
     let mut done = 0;
     let mut saved = 0;
     let mut failures: Vec<String> = Vec::new();
@@ -60,7 +79,18 @@ fn save_all(state: &SharedState) {
             s.status_message = format!("[{}/{}] 处理: {}", done + 1, total, file.name);
         }
 
-        let ad_ranges: Vec<Range> = file.effective_ads(thresholds).copied().collect();
+        // 只删除被标记的段（索引基于当前有效广告段）
+        let effective: Vec<Range> = file.effective_ads(thresholds).copied().collect();
+        let ad_ranges: Vec<Range> = file
+            .marked_for_deletion
+            .iter()
+            .filter_map(|&idx| effective.get(idx).copied())
+            .collect();
+        if ad_ranges.is_empty() {
+            // 标记的段在当前阈值下已失效，跳过
+            done += 1;
+            continue;
+        }
 
         let result = if overwrite {
             pipeline::overwrite_file(&file.path, &ad_ranges, file.length)
@@ -79,6 +109,7 @@ fn save_all(state: &SharedState) {
                 s.status_message = format!("保存进度: {}/{}", done, total);
                 if let Some(f) = s.files.get_mut(file_idx) {
                     f.needs_save = false;
+                    f.marked_for_deletion.clear();
                 }
             }
             Err(e) => {
@@ -91,7 +122,6 @@ fn save_all(state: &SharedState) {
     }
 
     let mut s = state.lock().unwrap();
-    s.is_processing = false;
     s.progress = 1.0;
     s.status_message = if failures.is_empty() {
         if overwrite {

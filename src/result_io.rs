@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 use crate::core::detect::DetectionResult;
 use crate::core::range::Range;
 
+/// 结果文件最多允许声明的文件数（防恶意/损坏文件触发 OOM）
+const MAX_FILES: usize = 10_000;
+/// 每个文件最多允许的区间数
+const MAX_RANGES_PER_FILE: usize = 100_000;
+
 /// 保存检测结果
 pub fn save(result: &DetectionResult, files: &[PathBuf], output: &Path) -> Result<()> {
     if files.len() != result.ranges.len() || files.len() != result.lengths.len() {
@@ -62,6 +67,14 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
         .parse()
         .context("结果文件头不是有效的文件数量")?;
 
+    if num_files > MAX_FILES {
+        bail!(
+            "结果文件声明的文件数 {} 超过上限 {}",
+            num_files,
+            MAX_FILES
+        );
+    }
+
     let mut ranges = Vec::with_capacity(num_files);
     let mut lengths = Vec::with_capacity(num_files);
 
@@ -73,6 +86,15 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
         let num_ranges: usize = next_line(&mut lines)?
             .parse()
             .with_context(|| format!("第 {} 个文件的区间数量无效", file_idx + 1))?;
+
+        if num_ranges > MAX_RANGES_PER_FILE {
+            bail!(
+                "第 {} 个文件声明的区间数 {} 超过上限 {}",
+                file_idx + 1,
+                num_ranges,
+                MAX_RANGES_PER_FILE
+            );
+        }
 
         let mut file_ranges = Vec::with_capacity(num_ranges);
         for range_idx in 0..num_ranges {
