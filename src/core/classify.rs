@@ -1,5 +1,5 @@
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use crate::audio::{cache, ffmpeg};
 use crate::core::fft::read_wav_samples;
@@ -28,6 +28,9 @@ impl Default for ClassifyOptions {
 pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptions) -> Result<Vec<EventRange>> {
     let ws = (model.window_sec * SEG_SR as f64) as usize;
     let hs = (model.hop_sec * SEG_SR as f64) as usize;
+    if hs == 0 {
+        bail!("hop_sec * 采样率取整为 0，无法滑动（模型 hop_sec={}）", model.hop_sec);
+    }
     if samples.len() < ws { return Ok(Vec::new()); }
     let nw = (samples.len() - ws) / hs + 1;
     let mut fp: Vec<Option<(usize, f64)>> = Vec::with_capacity(nw);

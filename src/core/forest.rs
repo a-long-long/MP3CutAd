@@ -37,10 +37,14 @@ pub struct Forest {
 }
 
 impl Forest {
-    pub fn train(x: &Array2<f64>, y: &[usize], params: &ForestParams, seed: u64) -> Self {
+    /// 训练随机森林。
+    ///
+    /// `n_classes` 可取 Some(全量标签数) 或 None 自动从 y 的最大标签推断。
+    /// 显式指定时避免"某些标签仅在测试集导致 n_classes 偏小"的问题。
+    pub fn train(x: &Array2<f64>, y: &[usize], params: &ForestParams, seed: u64, n_classes: Option<usize>) -> Self {
         let n_samples = x.nrows();
         let dim = x.ncols();
-        let n_classes = *y.iter().max().unwrap_or(&0) + 1;
+        let nc = n_classes.unwrap_or_else(|| y.iter().max().copied().unwrap_or(0) + 1).max(1);
         let mf = if params.max_features == 0 { (dim as f64).sqrt() as usize } else { params.max_features.min(dim) };
         let indices: Vec<usize> = (0..n_samples).collect();
         let trees: Vec<Vec<Node>> = (0..params.n_trees).into_par_iter().map(|t| {
@@ -50,10 +54,10 @@ impl Forest {
             let bx: Vec<Vec<f64>> = boot.iter().map(|&i| x.row(i).to_vec()).collect();
             let by: Vec<usize> = boot.iter().map(|&i| y[i]).collect();
             let mut tree = Vec::new();
-            build_tree(&bx, &by, 0, params.max_depth, params.min_samples_split, mf, n_classes, &mut tree, &mut rng);
+            build_tree(&bx, &by, 0, params.max_depth, params.min_samples_split, mf, nc, &mut tree, &mut rng);
             tree
         }).collect();
-        Forest { trees, n_classes, feature_dim: dim }
+        Forest { trees, n_classes: nc, feature_dim: dim }
     }
     pub fn predict(&self, feat: &[f64]) -> (usize, f64) {
         let p = self.predict_proba(feat);
@@ -69,6 +73,10 @@ impl Forest {
 }
 
 fn traverse<'a>(tree: &'a [Node], feat: &[f64]) -> &'a Node {
+    // 空树防御（损坏模型时调用链早期报错）
+    if tree.is_empty() {
+        panic!("traverse: 空树（森林节点为空，模型可能已损坏）");
+    }
     let mut i = tree.len() - 1;
     loop {
         let n = &tree[i];
@@ -76,6 +84,8 @@ fn traverse<'a>(tree: &'a [Node], feat: &[f64]) -> &'a Node {
         let f = n.feature as usize;
         if f >= feat.len() { return n; }
         i = if feat[f] <= n.threshold { n.left as usize } else { n.right as usize };
+        // 边界防御：索引越界则返回当前节点（若子节点索引损坏）
+        if i >= tree.len() { return n; }
     }
 }
 

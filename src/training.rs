@@ -227,7 +227,7 @@ where
         max_depth: config.max_depth.max(1),
         ..Default::default()
     };
-    let forest = Forest::train(&train_x, &train_y, &params, config.seed);
+    let forest = Forest::train(&train_x, &train_y, &params, config.seed, Some(labels.len()));
 
     // 5. 测试集评估
     let mut metrics = Vec::with_capacity(labels.len());
