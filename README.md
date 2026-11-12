@@ -46,9 +46,11 @@ build.bat
 
 脚本依次构建库、CLI、GUI，并把产物复制到 `release\` 目录：
 
-- `release\MP3CutAd-RS.exe`（由 `mp3cutad-gui.exe` 复制而来）
+- `release\MP3CutAd-RS.exe`（由 `mp3cutad-gui.exe` 复制并重命名，只保留这一个 GUI 文件）
 - `release\mp3cutad-cli.exe`
 - `release\mp3cutad_rs.dll`
+
+`release\` 不会再保留 `mp3cutad-gui.exe` 副本；需要原名时直接从 `target\release\` 取。
 
 ### 方式二：手动构建
 
@@ -109,7 +111,7 @@ $env:RUST_LOG="debug"; cargo run --features gui --bin mp3cutad-gui
 
 ## 图形界面
 
-直接运行 `mp3cutad-gui.exe`（或 `MP3CutAd-RS.exe`）：
+直接运行 `release\MP3CutAd-RS.exe`（开发构建可直接运行 `target\release\mp3cutad-gui.exe`）：
 
 1. **添加文件 / 添加目录**：支持上述 8 种音频格式
 2. **检测广告**：状态栏显示实时进度（预处理音频 i/N、比对音频片段 i/M）；勾选「HPSS 分离」会在预处理阶段先做谐波-打击乐分离，只对打击乐轨道检测，适合广告段混有背景音乐的素材

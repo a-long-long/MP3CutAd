@@ -18,6 +18,8 @@ cargo build --release --features gui --bin mp3cutad-gui
 echo.
 echo [4/4] Copying files...
 if not exist "release" mkdir release
+REM 清理旧版遗留的重名副本，release 目录只保留最终产物
+if exist "release\mp3cutad-gui.exe" del /Q "release\mp3cutad-gui.exe"
 copy /Y "target\release\mp3cutad-gui.exe" "release\MP3CutAd-RS.exe"
 copy /Y "target\release\mp3cutad-cli.exe" "release\mp3cutad-cli.exe"
 copy /Y "target\release\mp3cutad_rs.dll" "release\mp3cutad_rs.dll"
