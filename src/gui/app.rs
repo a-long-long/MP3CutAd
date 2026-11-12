@@ -11,7 +11,8 @@ struct Mp3CutAdApp {
 }
 
 impl Mp3CutAdApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        cc.egui_ctx.set_visuals(egui::Visuals::light());
         Self {
             state: Default::default(),
         }
