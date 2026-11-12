@@ -75,7 +75,7 @@ pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptio
                     _ => {
                         if let Some((c, sw, ew, confs)) = cur.take() {
                             let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-                            merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+                            merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
                         }
                         cur = Some((*cls, i, i, vec![*conf]));
                     }
@@ -84,14 +84,14 @@ pub fn classify_samples(samples: &[f64], model: &ModelFile, opts: &ClassifyOptio
             None => {
                 if let Some((c, sw, ew, confs)) = cur.take() {
                     let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-                    merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+                    merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
                 }
             }
         }
     }
     if let Some((c, sw, ew, confs)) = cur.take() {
         let avg = confs.iter().sum::<f64>() / confs.len() as f64;
-        merged.push((c, to01(sw), to01(ew) + model.hop_sec as i32 * 10, avg));
+        merged.push((c, to01(sw), to01(ew) + (model.hop_sec * 10.0).round() as i32, avg));
     }
     Ok(merged.into_iter().filter(|(_, b, e, _)| e - b >= opts.min_event_len)
         .map(|(cls, b, e, conf)| EventRange { begin: b, end: e, label: model.labels.get(cls).cloned().unwrap_or_else(|| format!("类{}", cls)), confidence: conf })

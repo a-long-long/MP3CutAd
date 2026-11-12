@@ -19,7 +19,7 @@ use crate::core::features::{self, AudioFeatures};
 use crate::core::fft::{self, FFT_LEN};
 use crate::core::lsh;
 use crate::core::range::{Link, Range};
-use crate::core::separation::{self, HpssParams};
+use crate::core::separation;
 use crate::core::viterbi::{self, Candidate};
 
 /// 检测选项
@@ -139,7 +139,17 @@ where
                 // 读原始采样 → HPSS 打击乐 → 写临时 WAV
                 let raw = fft::read_wav_samples(&wav_path)?;
                 let perc = separation::separate_percussive(&raw)?;
-                let tmp_wav = std::env::temp_dir().join(format!("mp3cutad_hpss_{}.wav", idx));
+                // 文件名加 pid + 时间戳 + 随机，避免多进程/并发运行冲突，崩溃后残留也不会互相覆盖
+                let tmp_wav = std::env::temp_dir().join(format!(
+                    "mp3cutad_hpss_{}_{}_{}_{}.wav",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    idx,
+                    rand::random::<u32>()
+                ));
                 write_f64_wav(&tmp_wav, &perc)?;
 
                 let fft = fft::process_wav(&tmp_wav)?;

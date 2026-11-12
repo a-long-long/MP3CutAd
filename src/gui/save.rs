@@ -1,5 +1,6 @@
 //! 保存（按广告区间裁剪写盘）流程
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use std::thread;
 
@@ -11,7 +12,11 @@ use super::state::{AppState, FileInfo, SharedState};
 /// 启动保存：在后台线程中裁剪所有含有效广告段的文件
 pub fn start_save(state: &SharedState) {
     let state = state.clone();
-    thread::spawn(move || save_all(&state));
+    thread::spawn(move || {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            save_all(&state);
+        }));
+    });
 }
 
 fn save_all(state: &SharedState) {
@@ -50,6 +55,19 @@ fn save_all(state: &SharedState) {
         s.is_processing = true;
         s.status_message = format!("正在保存... 共 {} 个文件", total);
     }
+
+    // drop guard：无论 save_all 正常返回还是 panic，都保证 is_processing 复位
+    struct ProcessGuard<'a> {
+        state: &'a SharedState,
+    }
+    impl<'a> Drop for ProcessGuard<'a> {
+        fn drop(&mut self) {
+            if let Ok(mut s) = self.state.lock() {
+                s.is_processing = false;
+            }
+        }
+    }
+    let _guard = ProcessGuard { state };
 
     let mut done = 0;
     let mut saved = 0;
@@ -104,7 +122,6 @@ fn save_all(state: &SharedState) {
     }
 
     let mut s = state.lock().unwrap();
-    s.is_processing = false;
     s.progress = 1.0;
     s.status_message = if failures.is_empty() {
         if overwrite {
