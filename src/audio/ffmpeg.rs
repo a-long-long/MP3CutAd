@@ -36,12 +36,27 @@ fn run_ffmpeg(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// 确保输出文件的父目录存在。
+///
+/// ffmpeg 不会自动创建输出路径中的目录，缓存目录（如 `/tmp/mp3cutad_rs`）
+/// 首次不存在时会直接导致 `No such file or directory`，因此写文件前先建目录。
+fn ensure_parent_dir(output: &Path) -> Result<()> {
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("无法创建输出目录: {}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// 将任意音频格式转换为 WAV（单声道，22050Hz），用于特征提取
 ///
 /// # 参数
 /// - `input`: 输入音频文件路径（mp3/wav/flac/m4a/aac/ogg/opus/wma 等）
 /// - `output`: 输出 WAV 文件路径
 pub fn audio_to_wav(input: &Path, output: &Path) -> Result<()> {
+    ensure_parent_dir(output)?;
     run_ffmpeg(&[
         "-i",
         input.to_str().unwrap(),
@@ -64,6 +79,7 @@ pub fn audio_to_wav(input: &Path, output: &Path) -> Result<()> {
 /// - `from_sec`: 开始时间（秒）
 /// - `to_sec`: 结束时间（秒）
 pub fn split_audio(input: &Path, output: &Path, from_sec: f64, to_sec: f64) -> Result<()> {
+    ensure_parent_dir(output)?;
     run_ffmpeg(&[
         "-i",
         input.to_str().unwrap(),
@@ -102,6 +118,7 @@ pub fn concat_audio(list_file: &Path, output: &Path) -> Result<()> {
         _ => Vec::new(),
     };
 
+    ensure_parent_dir(output)?;
     let mut args: Vec<&str> = vec![
         "-f",
         "concat",
