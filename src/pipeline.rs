@@ -74,13 +74,17 @@ pub fn overwrite_file(input: &Path, ad_ranges: &[Range], total_len: usize) -> Re
 
     cut_file(input, &tmp, ad_ranges, total_len)?;
 
-    let result =
-        std::fs::copy(&tmp, input).with_context(|| format!("无法覆盖原文件: {}", input.display()));
-
-    if result.is_ok() {
-        let _ = std::fs::remove_file(&tmp);
-        cache::clear(input);
+    // 用同目录 rename 原子替换原文件，避免 fs::copy 中途失败把原文件写坏。
+    // tmp 与 input 同目录，因此 rename 不会跨文件系统。
+    match std::fs::rename(&tmp, input) {
+        Ok(_) => {
+            cache::clear(input);
+            Ok(())
+        }
+        Err(e) => {
+            // 失败时清理临时文件，原文件保持不动
+            let _ = std::fs::remove_file(&tmp);
+            Err(e).with_context(|| format!("无法覆盖原文件: {}", input.display()))
+        }
     }
-
-    result.map(|_| ())
 }

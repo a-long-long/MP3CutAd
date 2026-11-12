@@ -112,6 +112,8 @@ where
         .collect();
     let total_steps = (num_files + pairs.len()).max(1);
     let done = AtomicUsize::new(0);
+    // 预处理失败的文件（不中止整批，仅跳过并记录）
+    let mut failed: Vec<String> = Vec::new();
 
     // 1. 处理每个文件：MP3 → WAV → (HPSS 可选) → FFT → Features → Hash
     for (idx, mp3_path) in mp3_files.iter().enumerate() {
@@ -120,54 +122,66 @@ where
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let (fft_data, hash_data) = if opts.enable_hpss {
-            // HPSS 路径：绕过 FFT/Hash 缓存，每次重新计算
-            let wav_path = cache::wav_path(mp3_path);
-            if !cache::is_fresh(mp3_path, &wav_path) {
-                ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
-            }
+        // 预处理单个文件；任一步失败只跳过该文件，不中止整批
+        let processed: Result<(Array2<f64>, Vec<i32>)> = (|| {
+            Ok(if opts.enable_hpss {
+                // HPSS 路径：绕过 FFT/Hash 缓存，每次重新计算
+                let wav_path = cache::wav_path(mp3_path);
+                if !cache::is_fresh(mp3_path, &wav_path) {
+                    ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
+                }
 
-            on_progress(
-                idx as f32 / num_files as f32,
-                &format!("HPSS 分离中 {}/{}: {}", idx + 1, num_files, file_name),
-            );
+                on_progress(
+                    idx as f32 / num_files as f32,
+                    &format!("HPSS 分离中 {}/{}: {}", idx + 1, num_files, file_name),
+                );
 
-            // 读原始采样 → HPSS 打击乐 → 写临时 WAV
-            let raw = fft::read_wav_samples(&wav_path)?;
-            let perc = separation::separate_percussive(&raw)?;
-            let tmp_wav = std::env::temp_dir().join(format!("mp3cutad_hpss_{}.wav", idx));
-            write_f64_wav(&tmp_wav, &perc)?;
+                // 读原始采样 → HPSS 打击乐 → 写临时 WAV
+                let raw = fft::read_wav_samples(&wav_path)?;
+                let perc = separation::separate_percussive(&raw)?;
+                let tmp_wav = std::env::temp_dir().join(format!("mp3cutad_hpss_{}.wav", idx));
+                write_f64_wav(&tmp_wav, &perc)?;
 
-            let fft = fft::process_wav(&tmp_wav)?;
-            let hash = lsh::hash_all(&fft, HASH_WINDOW_SIZE);
-            let _ = std::fs::remove_file(&wav_path);
-            let _ = std::fs::remove_file(&tmp_wav);
-            (fft, hash)
-        } else {
-            // 常规路径：使用缓存
-            let fft_data = match cache::read_fft(mp3_path) {
-                Some(data) => data,
-                None => {
-                    let wav_path = cache::wav_path(mp3_path);
-                    if !cache::is_fresh(mp3_path, &wav_path) {
-                        ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
+                let fft = fft::process_wav(&tmp_wav)?;
+                let hash = lsh::hash_all(&fft, HASH_WINDOW_SIZE);
+                let _ = std::fs::remove_file(&wav_path);
+                let _ = std::fs::remove_file(&tmp_wav);
+                (fft, hash)
+            } else {
+                // 常规路径：使用缓存
+                let fft_data = match cache::read_fft(mp3_path) {
+                    Some(data) => data,
+                    None => {
+                        let wav_path = cache::wav_path(mp3_path);
+                        if !cache::is_fresh(mp3_path, &wav_path) {
+                            ffmpeg::audio_to_wav(mp3_path, &wav_path)?;
+                        }
+                        let data = fft::process_wav(&wav_path)?;
+                        cache::save_fft(mp3_path, &data)?;
+                        let _ = std::fs::remove_file(&wav_path);
+                        data
                     }
-                    let data = fft::process_wav(&wav_path)?;
-                    cache::save_fft(mp3_path, &data)?;
-                    let _ = std::fs::remove_file(&wav_path);
-                    data
-                }
-            };
-            let expected_hash_len = fft_data.nrows().saturating_sub(HASH_WINDOW_SIZE);
-            let hash_data = match cache::read_hash(mp3_path) {
-                Some(h) if h.len() == expected_hash_len => h,
-                _ => {
-                    let h = lsh::hash_all(&fft_data, HASH_WINDOW_SIZE);
-                    cache::save_hash(mp3_path, &h)?;
-                    h
-                }
-            };
-            (fft_data, hash_data)
+                };
+                let expected_hash_len = fft_data.nrows().saturating_sub(HASH_WINDOW_SIZE);
+                let hash_data = match cache::read_hash(mp3_path) {
+                    Some(h) if h.len() == expected_hash_len => h,
+                    _ => {
+                        let h = lsh::hash_all(&fft_data, HASH_WINDOW_SIZE);
+                        cache::save_hash(mp3_path, &h)?;
+                        h
+                    }
+                };
+                (fft_data, hash_data)
+            })
+        })();
+
+        let (fft_data, hash_data) = match processed {
+            Ok(v) => v,
+            Err(e) => {
+                failed.push(format!("{}: {}", file_name, e));
+                // 占位空数据，保证 ffts/feats/hashes 与文件索引对齐
+                (Array2::zeros((0, fft::FREQ_BINS)), Vec::new())
+            }
         };
 
         let feature_data = features::extract_features(&fft_data);
@@ -245,6 +259,13 @@ where
     }
 
     let lengths: Vec<usize> = ffts.iter().map(|f| f.nrows()).collect();
+
+    if !failed.is_empty() {
+        eprintln!("警告：{} 个文件预处理失败，已跳过（不影响其余文件）：", failed.len());
+        for f in &failed {
+            eprintln!("  - {}", f);
+        }
+    }
 
     Ok(DetectionResult { ranges, lengths })
 }
@@ -652,28 +673,32 @@ fn combine_to_ranges(existing: &[Range], new_ranges: &[Range]) -> Vec<Range> {
     compress_range(&result)
 }
 
-/// 压缩重叠区间
+/// 压缩重叠区间。
+///
+/// 先按 begin 排序，再单次线性扫描合并（前后相邻/相交则合并），
+/// 保证输出不含重叠且按 begin 升序。
 fn compress_range(ranges: &[Range]) -> Vec<Range> {
-    let mut result: Vec<Range> = Vec::new();
+    let mut sorted: Vec<Range> = ranges.to_vec();
+    sorted.sort_by_key(|r| r.begin);
 
-    for &r in ranges {
-        let mut merged = false;
-        for existing in &mut result {
-            // 检查是否相交或相邻
-            if existing.begin <= r.end && r.begin <= existing.end {
-                existing.begin = existing.begin.min(r.begin);
-                existing.end = existing.end.max(r.end);
-                existing.count += r.count;
-                existing.score = existing.score.max(r.score);
-                merged = true;
-                break;
+    let mut result: Vec<Range> = Vec::with_capacity(sorted.len());
+    for r in sorted {
+        // 跳过非法段（begin >= end）
+        if r.begin >= r.end {
+            continue;
+        }
+        if let Some(last) = result.last_mut() {
+            // 相邻或相交则合并
+            if r.begin <= last.end {
+                last.begin = last.begin.min(r.begin);
+                last.end = last.end.max(r.end);
+                last.count += r.count;
+                last.score = last.score.max(r.score);
+                continue;
             }
         }
-        if !merged {
-            result.push(r);
-        }
+        result.push(r);
     }
-
     result
 }
 
@@ -759,27 +784,37 @@ fn bfs_set_type(
 /// 反转区间（获取非广告部分）
 pub fn reverse_range(ranges: &[Range], total_len: usize) -> Vec<Range> {
     let mut result = Vec::new();
-    let mut sorted: Vec<_> = ranges.iter().filter(|r| r.count > 1).collect();
+    // 过滤 count<=1 + 非法段 + 按 begin 排序（防御上游可能残留的重叠/乱序）
+    let mut sorted: Vec<_> = ranges
+        .iter()
+        .filter(|r| r.count > 1 && r.begin < r.end)
+        .collect();
     sorted.sort_by_key(|r| r.begin);
 
     if sorted.is_empty() {
-        result.push(Range::new_simple(0, total_len as i32));
+        if total_len > 0 {
+            result.push(Range::new_simple(0, total_len as i32));
+        }
         return result;
     }
+
+    let total = total_len as i32;
 
     if sorted[0].begin > 0 {
         result.push(Range::new_simple(0, sorted[0].begin));
     }
 
     for i in 1..sorted.len() {
-        result.push(Range::new_simple(sorted[i - 1].end, sorted[i].begin));
+        let gap_begin = sorted[i - 1].end.max(0);
+        let gap_end = sorted[i].begin.max(gap_begin);
+        if gap_begin < gap_end {
+            result.push(Range::new_simple(gap_begin, gap_end));
+        }
     }
 
-    if sorted.last().unwrap().end < total_len as i32 {
-        result.push(Range::new_simple(
-            sorted.last().unwrap().end,
-            total_len as i32,
-        ));
+    let last_end = sorted.last().unwrap().end.max(0);
+    if last_end < total {
+        result.push(Range::new_simple(last_end, total));
     }
 
     result

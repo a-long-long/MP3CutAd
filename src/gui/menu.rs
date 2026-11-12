@@ -104,10 +104,10 @@ pub fn menu_bar(ctx: &Context, state: &SharedState) {
 
             let files_to_save = {
                 let s = state.lock().unwrap();
-                let th = s.thresholds;
+                // 与 save.rs 一致：只有被「删除已选」标记过的文件才会被保存
                 s.files
                     .iter()
-                    .filter(|f| f.detected && f.has_effective_ads(th))
+                    .filter(|f| f.detected && !f.marked_for_deletion.is_empty())
                     .count()
             };
 

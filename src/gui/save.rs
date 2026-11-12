@@ -32,10 +32,11 @@ fn save_all(state: &SharedState) {
         return;
     }
 
+    // 只处理用户通过「删除已选」标记过的文件（未标记的文件不动）
     let targets: Vec<(usize, FileInfo)> = files
         .into_iter()
         .enumerate()
-        .filter(|(_, f)| f.detected && f.has_effective_ads(thresholds))
+        .filter(|(_, f)| f.detected && !f.marked_for_deletion.is_empty())
         .collect();
 
     if targets.is_empty() {
@@ -60,7 +61,18 @@ fn save_all(state: &SharedState) {
             s.status_message = format!("[{}/{}] 处理: {}", done + 1, total, file.name);
         }
 
-        let ad_ranges: Vec<Range> = file.effective_ads(thresholds).copied().collect();
+        // 只删除被标记的段（索引基于当前有效广告段）
+        let effective: Vec<Range> = file.effective_ads(thresholds).copied().collect();
+        let ad_ranges: Vec<Range> = file
+            .marked_for_deletion
+            .iter()
+            .filter_map(|&idx| effective.get(idx).copied())
+            .collect();
+        if ad_ranges.is_empty() {
+            // 标记的段在当前阈值下已失效，跳过
+            done += 1;
+            continue;
+        }
 
         let result = if overwrite {
             pipeline::overwrite_file(&file.path, &ad_ranges, file.length)
@@ -79,6 +91,7 @@ fn save_all(state: &SharedState) {
                 s.status_message = format!("保存进度: {}/{}", done, total);
                 if let Some(f) = s.files.get_mut(file_idx) {
                     f.needs_save = false;
+                    f.marked_for_deletion.clear();
                 }
             }
             Err(e) => {
