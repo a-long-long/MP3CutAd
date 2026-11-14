@@ -5,13 +5,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use super::forest::Forest;
-use super::segfeat::{SEG_FEATURE_DIM, SEG_SR};
+use crate::core::dsp::segfeat::{SEG_FEATURE_DIM, SEG_SR};
 
 pub const MODEL_MAGIC: &[u8; 4] = b"MCRF";
 pub const MODEL_VERSION: u32 = 1;
 pub const MAX_TREES: usize = 4096;
 pub const MAX_NODES: usize = 64_000_000;
 pub const MAX_LABELS: usize = 4096;
+/// 模型文件最大字节数，防止损坏/恶意文件触发超大内存分配
+pub const MAX_MODEL_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelFile {
@@ -36,6 +38,14 @@ pub fn save_model(model: &ModelFile, path: &Path) -> Result<()> {
 
 pub fn load_model(path: &Path) -> Result<ModelFile> {
     let mut file = fs::File::open(path).with_context(|| format!("无法打开模型文件: {}", path.display()))?;
+    let file_len = file.metadata().context("无法读取模型文件元数据")?.len();
+    if file_len > MAX_MODEL_BYTES {
+        bail!(
+            "模型文件过大: {} 字节（上限 {} 字节）",
+            file_len,
+            MAX_MODEL_BYTES
+        );
+    }
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic).context("模型文件头不完整")?;
     if magic != *MODEL_MAGIC { bail!("不是有效的 MP3CutAd 模型文件"); }
@@ -44,7 +54,10 @@ pub fn load_model(path: &Path) -> Result<ModelFile> {
     let version = u32::from_le_bytes(ver_buf);
     if version != MODEL_VERSION { bail!("模型版本不兼容: 文件v{}, 当前v{}", version, MODEL_VERSION); }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).context("模型数据读取失败")?;
+    // take 限制读取上限，即使文件在 metadata 检查后被替换也不会无界分配
+    file.take(MAX_MODEL_BYTES)
+        .read_to_end(&mut buf)
+        .context("模型数据读取失败")?;
     let model: ModelFile = bincode::deserialize(&buf).context("模型反序列化失败")?;
     if model.feature_dim != SEG_FEATURE_DIM { bail!("特征维度异常: 期望 {}, 实际 {}", SEG_FEATURE_DIM, model.feature_dim); }
     if model.labels.is_empty() || model.labels.len() > MAX_LABELS { bail!("标签数量异常"); }

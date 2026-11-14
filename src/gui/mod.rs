@@ -1,19 +1,20 @@
 //! GUI 模块（需要 `gui` feature）
 //!
-//! 拆分为状态、播放、菜单、保存、文件列表与结果视图，避免单个文件承担全部界面逻辑。
+//! 按职责分组：
+//! - [`toolbar`] / [`status_bar`]：顶部工具栏与底部状态栏
+//! - [`panels`]：文件列表、结果视图与设置/训练/匹配选择窗口
+//! - [`widgets`]：音频条、图例与频谱可视化
+//! - [`tasks`]：检测、分类与保存后台任务
 
 mod app;
-mod file_list;
 mod fonts;
-mod match_select;
-mod menu;
+mod panels;
 mod playback;
-mod results;
-mod save;
-mod settings;
-mod spectrogram;
 mod state;
+mod status_bar;
 mod sysmon;
-mod train;
+mod tasks;
+mod toolbar;
+mod widgets;
 
 pub use app::run;

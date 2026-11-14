@@ -59,6 +59,13 @@ pub fn save(result: &DetectionResult, files: &[PathBuf], output: &Path) -> Resul
 
 /// 读取检测结果
 pub fn load(path: &Path) -> Result<DetectionResult> {
+    Ok(load_with_paths(path)?.1)
+}
+
+/// 读取检测结果，同时返回结果文件中记录的文件路径
+///
+/// 裁剪时按路径匹配，避免“目录扫描顺序”与“检测时顺序”不一致导致切错文件。
+pub fn load_with_paths(path: &Path) -> Result<(Vec<PathBuf>, DetectionResult)> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("无法打开结果文件: {}", path.display()))?;
     let mut lines = BufReader::new(file).lines();
@@ -75,11 +82,12 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
         );
     }
 
+    let mut paths = Vec::with_capacity(num_files);
     let mut ranges = Vec::with_capacity(num_files);
     let mut lengths = Vec::with_capacity(num_files);
 
     for file_idx in 0..num_files {
-        let _path = next_line(&mut lines)?;
+        paths.push(PathBuf::from(next_line(&mut lines)?));
         let length: usize = next_line(&mut lines)?
             .parse()
             .with_context(|| format!("第 {} 个文件的总帧数无效", file_idx + 1))?;
@@ -125,13 +133,46 @@ pub fn load(path: &Path) -> Result<DetectionResult> {
         lengths.push(length);
     }
 
-    Ok(DetectionResult {
+    let result = DetectionResult {
         ranges,
         lengths,
         gpu: None,
-    })
+    };
+    Ok((paths, result))
 }
 
 fn next_line(lines: &mut impl Iterator<Item = std::io::Result<String>>) -> Result<String> {
     lines.next().transpose()?.context("结果文件格式不完整")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_load_roundtrip_keeps_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "mp3cutad_result_test_{}_{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result_path = dir.join("result.txt");
+
+        let files = vec![PathBuf::from("a/1.mp3"), PathBuf::from("b/2.mp3")];
+        let result = DetectionResult {
+            ranges: vec![vec![Range::new(10, 20, 2)], Vec::new()],
+            lengths: vec![100, 200],
+            gpu: None,
+        };
+        save(&result, &files, &result_path).unwrap();
+
+        let (loaded_paths, loaded) = load_with_paths(&result_path).unwrap();
+        assert_eq!(loaded_paths, files);
+        assert_eq!(loaded.lengths, result.lengths);
+        assert_eq!(loaded.ranges.len(), 2);
+        assert_eq!(loaded.ranges[0][0].begin, 10);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

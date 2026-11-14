@@ -17,9 +17,14 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const FFMPEG_PATH: &str = "ffmpeg";
 
 /// 执行 FFmpeg 命令
-fn run_ffmpeg(args: &[&str]) -> Result<()> {
+///
+/// 通过闭包构造参数，路径直接以 `OsStr` 传入，避免非 UTF-8 路径 `to_str().unwrap()` panic。
+fn run_ffmpeg<F>(build: F) -> Result<()>
+where
+    F: FnOnce(&mut Command),
+{
     let mut cmd = Command::new(FFMPEG_PATH);
-    cmd.args(args);
+    build(&mut cmd);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -57,18 +62,15 @@ fn ensure_parent_dir(output: &Path) -> Result<()> {
 /// - `output`: 输出 WAV 文件路径
 pub fn audio_to_wav(input: &Path, output: &Path) -> Result<()> {
     ensure_parent_dir(output)?;
-    run_ffmpeg(&[
-        "-i",
-        input.to_str().unwrap(),
-        "-ac",
-        "1", // 单声道
-        "-ar",
-        "22050", // 22050 Hz 采样率
-        "-f",
-        "wav",
-        "-y", // 覆盖输出文件
-        output.to_str().unwrap(),
-    ])
+    run_ffmpeg(|cmd| {
+        cmd.arg("-i")
+            .arg(input)
+            .args(["-ac", "1"]) // 单声道
+            .args(["-ar", "22050"]) // 22050 Hz 采样率
+            .args(["-f", "wav"])
+            .arg("-y") // 覆盖输出文件
+            .arg(output);
+    })
 }
 
 /// 裁剪音频文件
@@ -80,18 +82,16 @@ pub fn audio_to_wav(input: &Path, output: &Path) -> Result<()> {
 /// - `to_sec`: 结束时间（秒）
 pub fn split_audio(input: &Path, output: &Path, from_sec: f64, to_sec: f64) -> Result<()> {
     ensure_parent_dir(output)?;
-    run_ffmpeg(&[
-        "-i",
-        input.to_str().unwrap(),
-        "-c",
-        "copy",
-        "-ss",
-        &format!("{}", from_sec),
-        "-to",
-        &format!("{}", to_sec),
-        "-y",
-        output.to_str().unwrap(),
-    ])
+    run_ffmpeg(|cmd| {
+        cmd.arg("-i")
+            .arg(input)
+            .args(["-c", "copy", "-ss"])
+            .arg(format!("{}", from_sec))
+            .arg("-to")
+            .arg(format!("{}", to_sec))
+            .arg("-y")
+            .arg(output);
+    })
 }
 
 /// 拼接多个音频文件
@@ -119,18 +119,15 @@ pub fn concat_audio(list_file: &Path, output: &Path) -> Result<()> {
     };
 
     ensure_parent_dir(output)?;
-    let mut args: Vec<&str> = vec![
-        "-f",
-        "concat",
-        "-safe",
-        "0", // 允许列表中使用绝对路径
-        "-i",
-        list_file.to_str().unwrap(),
-    ];
-    args.extend(codec_args.iter().map(String::as_str));
-    args.extend(["-y", output.to_str().unwrap()]);
-
-    run_ffmpeg(&args)
+    run_ffmpeg(|cmd| {
+        cmd.args(["-f", "concat", "-safe", "0"]) // safe=0 允许列表中使用绝对路径
+            .arg("-i")
+            .arg(list_file);
+        for arg in &codec_args {
+            cmd.arg(arg);
+        }
+        cmd.arg("-y").arg(output);
+    })
 }
 
 /// 裁剪并拼接音频（按照 C# 版本的逻辑）
@@ -162,7 +159,7 @@ pub fn cut_and_combine(input: &Path, output: &Path, segments: &[(i32, i32)]) -> 
         let temp_file = output_dir.join(format!("{}_{}.{}", base_name, i, ext));
         split_audio(input, &temp_file, from_sec, to_sec)?;
 
-        list_content.push_str(&format!("file '{}'\n", temp_file.to_str().unwrap()));
+        list_content.push_str(&format!("file '{}'\n", temp_file.display()));
         temp_files.push(temp_file);
     }
 

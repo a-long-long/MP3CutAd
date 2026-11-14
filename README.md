@@ -334,7 +334,7 @@ mp3cutad-cli classify [OPTIONS] <FILES>...
 
 ### 检测参数
 
-以下常量集中在 [src/core/detect.rs](src/core/detect.rs) 顶部，可按素材特点调整：
+以下常量按功能分布在 [src/core/detect/](src/core/detect) 下（`mod.rs` 编排、`scan.rs` 阈值扫描、`refine.rs` 精修），可按素材特点调整：
 
 | 常量 | 默认值 | 作用 |
 |---|---|---|
@@ -360,7 +360,7 @@ mp3cutad-cli classify [OPTIONS] <FILES>...
 3. 用软掩码按能量比例分配频谱，保留 STFT 相位做逆变换回时域
 4. 只把打击乐轨道写回临时 WAV 并继续做 FFT / 哈希
 
-人声与音乐的持续音更偏谐波，广告中的音效、节奏点更偏打击乐，因此只比对打击乐轨道能降低背景音乐造成的假相似。代价是每次检测都要重新分离，不复用 FFT 与哈希缓存。参数定义在 [src/core/separation.rs](src/core/separation.rs)（`HpssParams`）。
+人声与音乐的持续音更偏谐波，广告中的音效、节奏点更偏打击乐，因此只比对打击乐轨道能降低背景音乐造成的假相似。代价是每次检测都要重新分离，不复用 FFT 与哈希缓存。参数定义在 [src/core/dsp/separation.rs](src/core/dsp/separation.rs)（`HpssParams`）。
 
 ### 事件分类
 
@@ -372,7 +372,7 @@ mp3cutad-cli classify [OPTIONS] <FILES>...
 4. 置信度低于阈值（默认 0.55）的窗口标记为「无事件」，再经多数投票平滑（窗口 3）
 5. 合并相邻同标签窗口，输出事件区间（起止帧、标签、平均置信度）
 
-模型以 `.mcrf` 保存（`MCRF` 魔数 + 版本号 + bincode 数据），加载时会校验特征维度、标签数、树数与节点总数，避免损坏文件导致崩溃。相关实现见 [segfeat.rs](src/core/segfeat.rs)、[forest.rs](src/core/forest.rs)、[model.rs](src/core/model.rs)、[classify.rs](src/core/classify.rs)。
+模型以 `.mcrf` 保存（`MCRF` 魔数 + 版本号 + bincode 数据），加载时会校验特征维度、标签数、树数与节点总数，避免损坏文件导致崩溃。相关实现见 [segfeat.rs](src/core/dsp/segfeat.rs)、[forest.rs](src/core/classify/forest.rs)、[model.rs](src/core/classify/model.rs)、[classify.rs](src/core/classify/mod.rs)。
 
 ## 输出格式与缓存
 
@@ -394,18 +394,25 @@ src/
 ├── main.rs           # CLI 入口（薄壳）
 ├── gui_main.rs       # GUI 入口（薄壳）
 ├── core/             # 纯算法层（不执行外部程序）
-│   ├── fft.rs        # FFT 频谱分析
-│   ├── gpu.rs        # GPU 批量余弦相似度（feature: gpu）
-│   ├── lsh.rs        # 局部敏感哈希与相似度
-│   ├── features.rs   # MFCC / Chroma 多特征
-│   ├── viterbi.rs    # 时序一致性过滤
-│   ├── detect.rs     # 广告检测流程（含进度回调、HPSS 开关）
+│   ├── dsp/          # 数字信号处理
+│   │   ├── fft.rs        # FFT 频谱分析
+│   │   ├── features.rs   # MFCC / Chroma 多特征
+│   │   ├── segfeat.rs    # 事件分类的段级特征（Mel/MFCC/谱对比度）
+│   │   └── separation.rs # HPSS 谐波-打击乐源分离
+│   ├── matching/     # 相似度匹配
+│   │   ├── lsh.rs        # 局部敏感哈希与相似度
+│   │   └── gpu.rs        # GPU 批量余弦相似度（feature: gpu）
+│   ├── detect/       # 广告检测
+│   │   ├── mod.rs        # 流程编排（进度回调、HPSS 开关）
+│   │   ├── scan.rs       # 自适应阈值与 LSH 候选扫描
+│   │   ├── refine.rs     # Viterbi 过滤、多特征精修与边界收紧
+│   │   └── merge.rs      # 区间合并、类型计算与补集
+│   ├── classify/     # 事件分类
+│   │   ├── mod.rs        # 滑窗分类、平滑与事件合并
+│   │   ├── forest.rs     # 随机森林训练与预测
+│   │   └── model.rs      # .mcrf 模型序列化与校验
 │   ├── range.rs      # 区间数据结构
-│   ├── separation.rs # HPSS 谐波-打击乐源分离
-│   ├── segfeat.rs    # 事件分类的段级特征（Mel/MFCC/谱对比度）
-│   ├── forest.rs     # 随机森林训练与预测
-│   ├── model.rs      # .mcrf 模型序列化与校验
-│   └── classify.rs   # 滑窗分类、平滑与事件合并
+│   └── viterbi.rs    # 时序一致性过滤
 ├── audio/            # 音频 I/O
 │   ├── ffmpeg.rs     # FFmpeg 封装（解码 / 裁剪 / 拼接）
 │   └── cache.rs      # 检测中间结果缓存
@@ -419,14 +426,24 @@ src/
 │   ├── app.rs        # 应用入口与主循环
 │   ├── state.rs      # 界面状态模型
 │   ├── playback.rs   # 广告段预览播放
-│   ├── menu.rs       # 工具栏与状态栏
-│   ├── save.rs       # 保存（裁剪写盘）流程
-│   ├── file_list.rs  # 左侧文件列表
-│   ├── results.rs    # 时间轴与结果视图
-│   ├── spectrogram.rs # 能量包络与 Mel 频谱可视化
-│   ├── settings.rs   # 阈值设置窗口
-│   ├── train.rs      # 训练样本管理与模型训练窗口
-│   └── fonts.rs      # 中文字体
+│   ├── toolbar.rs    # 顶部工具栏
+│   ├── status_bar.rs # 底部状态栏（含 CPU/GPU 占用）
+│   ├── sysmon.rs     # 系统资源监控
+│   ├── fonts.rs      # 中文字体
+│   ├── panels/       # 面板
+│   │   ├── file_list.rs  # 左侧文件列表
+│   │   ├── results.rs    # 时间轴与结果视图
+│   │   ├── settings.rs   # 阈值设置窗口
+│   │   ├── match_select.rs # 按匹配度批量选择
+│   │   └── train.rs      # 训练样本管理与模型训练窗口
+│   ├── widgets/      # 控件
+│   │   ├── track.rs      # 音频条、事件轨道与时间刻度
+│   │   ├── legend.rs     # 图例与配色
+│   │   └── spectrogram.rs # 能量包络与 Mel 频谱可视化
+│   └── tasks/        # 后台任务
+│       ├── detect.rs     # 文件添加与广告检测
+│       ├── classify.rs   # 模型选择与事件分类
+│       └── save.rs       # 保存（裁剪写盘）流程
 └── ffi.rs            # C ABI 接口
 
 assets/

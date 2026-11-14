@@ -11,7 +11,7 @@ use egui::Context;
 use crate::audio::ffmpeg;
 use crate::training::{format_report, train_model, TrainConfig, TrainSample};
 
-use super::state::SharedState;
+use super::super::state::SharedState;
 
 /// 音频文件对话框过滤器
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "wma"];

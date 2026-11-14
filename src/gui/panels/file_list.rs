@@ -2,7 +2,7 @@
 
 use egui::Context;
 
-use super::state::SharedState;
+use super::super::state::SharedState;
 
 /// 文件列表
 pub fn show(ctx: &Context, state: &SharedState) {
@@ -12,9 +12,9 @@ pub fn show(ctx: &Context, state: &SharedState) {
             ui.heading("文件列表");
             ui.separator();
 
-            let (files, selected) = {
+            let (files, selected, thresholds) = {
                 let s = state.lock().unwrap();
-                (s.files.clone(), s.selected_file)
+                (s.files.clone(), s.selected_file, s.thresholds)
             };
 
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -43,12 +43,14 @@ pub fn show(ctx: &Context, state: &SharedState) {
 
                             if file.detected {
                                 ui.indent("ads", |ui| {
+                                    // 与结果面板一致：只统计满足当前阈值的有效广告段
+                                    let ad_count = file.effective_ad_count(thresholds);
                                     if file.marked_for_deletion.is_empty() {
-                                        ui.label(format!("广告: {} 个", file.ad_ranges.len()));
+                                        ui.label(format!("广告: {} 个", ad_count));
                                     } else {
                                         ui.label(format!(
                                             "广告: {} 个（已标记删除 {}）",
-                                            file.ad_ranges.len(),
+                                            ad_count,
                                             file.marked_for_deletion.len()
                                         ));
                                     }

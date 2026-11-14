@@ -185,6 +185,16 @@ mod imp {
         if pairs.len() < MIN_PAIRS_FOR_GPU || a.ncols() != b.ncols() {
             return None;
         }
+        // window_norms 依赖 size <= 行数；候选下标也必须能容纳完整窗口
+        if size == 0 || size > a.nrows() || size > b.nrows() {
+            return None;
+        }
+        if pairs.iter().any(|&(i, j)| {
+            i.checked_add(size).is_none_or(|e| e > a.nrows())
+                || j.checked_add(size).is_none_or(|e| e > b.nrows())
+        }) {
+            return None;
+        }
         let width = a.ncols();
         let a_data = to_f32(a)?;
         let b_data = to_f32(b)?;
@@ -379,7 +389,7 @@ pub use imp::{backend_name, cosine_pairs};
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
-    use crate::core::lsh;
+    use crate::core::matching::lsh;
     use ndarray::Array2;
 
     /// GPU 结果需与 CPU 余弦相似度一致；无可用显卡时跳过

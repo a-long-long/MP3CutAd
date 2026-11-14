@@ -3,12 +3,14 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::audio::ffmpeg;
 use crate::core::classify::{classify_file_with_progress, ClassifyOptions};
-use crate::core::detect::{detect_ad_with_progress, DetectOptions, DetectionResult};
-use crate::core::model::load_model;
+use crate::core::detect::{detect_ad_with_progress, DetectOptions};
+use crate::core::classify::model::load_model;
+use crate::core::range::Range;
 use crate::training::{TrainConfig, TrainSample};
 use crate::{pipeline, result_io};
 
@@ -154,11 +156,13 @@ fn cmd_detect(files: &[PathBuf], output: Option<&PathBuf>, hpss: bool) -> Result
     } else {
         DetectOptions::default()
     };
+    // 复用同一个进度条，避免每次回调新建导致大量瞬时条
+    let pb = progress_bar(1000);
     let result = detect_ad_with_progress(files, opts, |p, msg| {
-        let bar = ProgressBar::new((p * 100.0) as u64);
-        bar.set_style(ProgressStyle::default_bar());
-        bar.println(msg);
+        pb.set_position((p * 1000.0) as u64);
+        pb.set_message(msg.to_string());
     })?;
+    pb.finish_and_clear();
 
     println!("\n检测结果:");
     println!("============");
@@ -194,22 +198,48 @@ fn cmd_detect(files: &[PathBuf], output: Option<&PathBuf>, hpss: bool) -> Result
 fn cmd_cut(input_dir: &Path, output_dir: &Path, result_file: &Path) -> Result<()> {
     println!("开始裁剪广告...");
 
-    let result = result_io::load(result_file)?;
+    let (result_paths, result) = result_io::load_with_paths(result_file)?;
     let audio_files = pipeline::collect_audio_files(input_dir)?;
 
-    if audio_files.len() != result.ranges.len() {
-        bail!(
-            "文件数量不匹配: 期望 {}, 实际 {}",
-            result.ranges.len(),
-            audio_files.len()
-        );
+    // 结果文件记录的是检测时的文件路径；按路径匹配，避免目录扫描顺序不同导致切错文件
+    let mut by_path: HashMap<PathBuf, (Vec<Range>, usize)> = HashMap::new();
+    for ((path, ranges), length) in result_paths
+        .iter()
+        .zip(result.ranges.into_iter())
+        .zip(result.lengths.into_iter())
+    {
+        by_path.insert(normalize_path(path), (ranges, length));
+    }
+
+    let mut items: Vec<(PathBuf, Vec<Range>, usize)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for audio_path in &audio_files {
+        match by_path.get(&normalize_path(audio_path)) {
+            Some((ranges, length)) => items.push((audio_path.clone(), ranges.clone(), *length)),
+            None => missing.push(audio_path.display().to_string()),
+        }
+    }
+
+    if items.is_empty() {
+        bail!("没有音频文件与结果文件中的路径匹配（请检查 --input-dir 是否与检测时一致）");
+    }
+    if !missing.is_empty() {
+        println!("警告：以下文件不在结果文件中，已跳过：");
+        for m in &missing {
+            println!("  {}", m);
+        }
     }
 
     std::fs::create_dir_all(output_dir)?;
-    cut_files(&audio_files, &result, output_dir)?;
+    cut_files(&items, output_dir)?;
 
     println!("\n输出目录: {}", output_dir.display());
     Ok(())
+}
+
+/// 统一路径形式，便于结果文件中的路径与目录扫描结果匹配
+fn normalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn cmd_auto(input_dir: &Path, output_dir: &Path) -> Result<()> {
@@ -225,9 +255,6 @@ fn cmd_auto(input_dir: &Path, output_dir: &Path) -> Result<()> {
     println!("找到 {} 个音频文件", audio_files.len());
 
     let result = detect_ad_with_progress(&audio_files, DetectOptions::default(), |_, _| {})?;
-
-    std::fs::create_dir_all(output_dir)?;
-    cut_files(&audio_files, &result, output_dir)?;
 
     println!("\n处理统计:");
     for (i, ranges) in result.ranges.iter().enumerate() {
@@ -247,6 +274,15 @@ fn cmd_auto(input_dir: &Path, output_dir: &Path) -> Result<()> {
             ratio
         );
     }
+
+    let items: Vec<(PathBuf, Vec<Range>, usize)> = audio_files
+        .into_iter()
+        .zip(result.ranges)
+        .zip(result.lengths)
+        .map(|((path, ranges), length)| (path, ranges, length))
+        .collect();
+    std::fs::create_dir_all(output_dir)?;
+    cut_files(&items, output_dir)?;
 
     println!("\n输出目录: {}", output_dir.display());
     Ok(())
@@ -380,23 +416,21 @@ fn cmd_classify(
 }
 
 /// 按检测结果批量裁剪并输出到指定目录（输出格式与源文件一致）
-fn cut_files(audio_files: &[PathBuf], result: &DetectionResult, output_dir: &Path) -> Result<()> {
-    let pb = progress_bar(audio_files.len() as u64);
+///
+/// 每一项为 `(源文件, 广告区间, 总帧数)`，区间与文件一一对应，避免按下标误配。
+fn cut_files(items: &[(PathBuf, Vec<Range>, usize)], output_dir: &Path) -> Result<()> {
+    let pb = progress_bar(items.len() as u64);
     let mut failures: Vec<String> = Vec::new();
 
-    for (i, audio_path) in audio_files.iter().enumerate() {
-        let output_path = output_dir.join(audio_path.file_name().unwrap());
-        if let Err(e) = pipeline::cut_file(
-            audio_path,
-            &output_path,
-            &result.ranges[i],
-            result.lengths[i],
-        ) {
-            failures.push(format!(
-                "{}: {}",
-                audio_path.file_name().unwrap().to_string_lossy(),
-                e
-            ));
+    for (audio_path, ranges, length) in items {
+        let Some(file_name) = audio_path.file_name() else {
+            failures.push(format!("{}: 无法获取文件名", audio_path.display()));
+            pb.inc(1);
+            continue;
+        };
+        let output_path = output_dir.join(file_name);
+        if let Err(e) = pipeline::cut_file(audio_path, &output_path, ranges, *length) {
+            failures.push(format!("{}: {}", audio_path.display(), e));
         }
         pb.inc(1);
     }

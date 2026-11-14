@@ -3,12 +3,12 @@
 //! 从 FFT 频谱图提取 MFCC 和 Chroma（色度）特征，
 //! 与原始频谱特征融合以提高广告识别准确率。
 //!
-//! 频率参数直接复用 [`crate::core::fft`] 的常量，避免与实际频谱图不一致。
+//! 频率参数直接复用 [`crate::core::dsp::fft`] 的常量，避免与实际频谱图不一致。
 
 use ndarray::Array2;
 use std::f64::consts::PI;
 
-use crate::core::fft::{FFT_LEN, FREQ_BINS, SAMPLE_RATE};
+use crate::core::dsp::fft::{FFT_LEN, FREQ_BINS, SAMPLE_RATE};
 
 /// FFT 窗口大小（与频谱图生成一致）
 const N_FFT: usize = FFT_LEN;

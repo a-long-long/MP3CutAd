@@ -5,7 +5,7 @@
 
 use egui::Context;
 
-use super::state::{AppState, MatchMode, SharedState};
+use super::super::state::{AppState, MatchMode, SharedState};
 
 /// 显示按匹配度选择窗口
 pub fn show(ctx: &Context, state: &SharedState) {

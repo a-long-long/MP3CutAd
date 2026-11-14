@@ -5,6 +5,9 @@ use rand::SeedableRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// 单棵树最大深度上限，防止极端配置导致递归过深
+pub const MAX_DEPTH_CAP: usize = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForestParams {
     pub n_trees: usize,
@@ -46,6 +49,7 @@ impl Forest {
         let dim = x.ncols();
         let nc = n_classes.unwrap_or_else(|| y.iter().max().copied().unwrap_or(0) + 1).max(1);
         let mf = if params.max_features == 0 { (dim as f64).sqrt() as usize } else { params.max_features.min(dim) };
+        let max_depth = params.max_depth.clamp(1, MAX_DEPTH_CAP);
         let indices: Vec<usize> = (0..n_samples).collect();
         let trees: Vec<Vec<Node>> = (0..params.n_trees).into_par_iter().map(|t| {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ (t as u64 + 1));
@@ -54,7 +58,7 @@ impl Forest {
             let bx: Vec<Vec<f64>> = boot.iter().map(|&i| x.row(i).to_vec()).collect();
             let by: Vec<usize> = boot.iter().map(|&i| y[i]).collect();
             let mut tree = Vec::new();
-            build_tree(&bx, &by, 0, params.max_depth, params.min_samples_split, mf, nc, &mut tree, &mut rng);
+            build_tree(&bx, &by, 0, max_depth, params.min_samples_split, mf, nc, &mut tree, &mut rng);
             tree
         }).collect();
         Forest { trees, n_classes: nc, feature_dim: dim }

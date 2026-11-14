@@ -203,7 +203,7 @@ pub struct AppState {
     /// 结果列表是否按平均匹配度从高到低排序
     pub sort_by_score: bool,
     /// 当前选中文件的可视化纹理缓存
-    pub viz_cache: Option<super::spectrogram::VizCache>,
+    pub viz_cache: Option<super::widgets::spectrogram::VizCache>,
     /// 事件分类模型路径
     pub model_path: Option<PathBuf>,
     /// 分类置信度阈值

@@ -3,7 +3,7 @@
 use eframe::egui;
 
 use super::state::SharedState;
-use super::{file_list, fonts, match_select, menu, results, settings, sysmon, train};
+use super::{fonts, panels, status_bar, sysmon, toolbar};
 
 /// 主应用
 struct Mp3CutAdApp {
@@ -24,13 +24,13 @@ impl Mp3CutAdApp {
 impl eframe::App for Mp3CutAdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.monitor.sample();
-        menu::menu_bar(ctx, &self.state);
-        menu::status_bar(ctx, &self.state, self.monitor.snapshot());
-        file_list::show(ctx, &self.state);
-        results::show(ctx, &self.state);
-        settings::show(ctx, &self.state);
-        match_select::show(ctx, &self.state);
-        train::show(ctx, &self.state);
+        toolbar::menu_bar(ctx, &self.state);
+        status_bar::status_bar(ctx, &self.state, self.monitor.snapshot());
+        panels::file_list::show(ctx, &self.state);
+        panels::results::show(ctx, &self.state);
+        panels::settings::show(ctx, &self.state);
+        panels::match_select::show(ctx, &self.state);
+        panels::train::show(ctx, &self.state);
 
         // 处理中或播放中时持续重绘
         let needs_repaint = {

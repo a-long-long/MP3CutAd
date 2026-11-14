@@ -37,15 +37,15 @@ pub(crate) fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
     let spec = reader.spec();
     let samples: Vec<f64> = match spec.sample_format {
         hound::SampleFormat::Int => {
-            // bits_per_sample 合法范围校验，防 0 或异常值导致移位溢出
+            // bits_per_sample 合法范围校验：限定 1..=32，避免移位/幂运算溢出
             let bits = spec.bits_per_sample;
-            if bits == 0 || bits > 64 {
+            if bits == 0 || bits > 32 {
                 anyhow::bail!(
                     "不支持的 WAV 位深 bits_per_sample={}（期望 8/16/24/32）",
                     bits
                 );
             }
-            let max_val = (1i64 << (bits - 1)) as f64;
+            let max_val = 2f64.powi(bits as i32 - 1);
             reader
                 .samples::<i32>()
                 .map(|s| s.map(|v| v as f64 / max_val))
@@ -57,16 +57,21 @@ pub(crate) fn read_wav_samples(path: &Path) -> Result<Vec<f64>> {
             .collect::<Result<Vec<_>, _>>()?,
     };
 
-    // 如果是立体声，取单声道。用 chunks_exact 丢弃奇数采样的尾部残缺，
-    // 避免 chunks(2) 静默丢失或 chunk[1] 越界。
-    if spec.channels >= 2 {
-        Ok(samples
-            .chunks_exact(2)
-            .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
-            .collect())
-    } else {
-        Ok(samples)
+    Ok(downmix(samples, spec.channels))
+}
+
+/// 多声道降混为单声道：按帧取各声道均值。
+///
+/// 使用 `chunks_exact` 丢弃不足一帧的尾部采样，避免越界或静默错位。
+fn downmix(samples: Vec<f64>, channels: u16) -> Vec<f64> {
+    let channels = channels.max(1) as usize;
+    if channels == 1 {
+        return samples;
     }
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f64>() / channels as f64)
+        .collect()
 }
 
 /// 将采样值转换为频谱图
@@ -135,5 +140,29 @@ mod tests {
         // 检查输出形状
         assert_eq!(result.ncols(), FREQ_BINS);
         assert!(result.nrows() > 0);
+    }
+
+    #[test]
+    fn downmix_averages_each_frame() {
+        // 2 声道：帧均值，尾部残缺帧丢弃
+        assert_eq!(downmix(vec![1.0, 3.0, 2.0, 4.0, 9.0], 2), vec![2.0, 3.0]);
+
+        // 3 声道
+        assert_eq!(
+            downmix(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3),
+            vec![2.0, 5.0]
+        );
+
+        // 6 声道（5.1）
+        let mut data = Vec::new();
+        for frame in 0..2 {
+            for ch in 0..6 {
+                data.push((frame * 6 + ch) as f64);
+            }
+        }
+        assert_eq!(downmix(data, 6), vec![2.5, 8.5]);
+
+        // 单声道原样返回
+        assert_eq!(downmix(vec![1.0, 2.0], 1), vec![1.0, 2.0]);
     }
 }

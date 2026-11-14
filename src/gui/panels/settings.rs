@@ -2,7 +2,7 @@
 
 use egui::Context;
 
-use super::state::{SharedState, Thresholds};
+use super::super::state::{SharedState, Thresholds};
 
 /// 显示阈值设置窗口
 pub fn show(ctx: &Context, state: &SharedState) {

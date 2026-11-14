@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::audio::{cache, ffmpeg};
-use crate::core::fft::read_wav_samples;
-use crate::core::forest::{Forest, ForestParams};
-use crate::core::model::{save_model, ModelFile, MODEL_VERSION};
-use crate::core::segfeat::{extract_segment_features, SEG_SR};
+use crate::core::classify::forest::{Forest, ForestParams};
+use crate::core::classify::model::{save_model, ModelFile, MODEL_VERSION};
+use crate::core::dsp::fft::read_wav_samples;
+use crate::core::dsp::segfeat::{extract_segment_features, SEG_SR};
 
 /// 默认窗口时长（秒）
 pub const DEFAULT_WINDOW_SEC: f64 = 2.0;
@@ -224,7 +224,7 @@ where
     on_progress(1.0, "训练随机森林...");
     let params = ForestParams {
         n_trees: config.n_trees.max(1),
-        max_depth: config.max_depth.max(1),
+        max_depth: config.max_depth.clamp(1, crate::core::classify::forest::MAX_DEPTH_CAP),
         ..Default::default()
     };
     let forest = Forest::train(&train_x, &train_y, &params, config.seed, Some(labels.len()));
@@ -343,7 +343,8 @@ fn sample_slice<'a>(raw: &'a [f64], split: Option<(usize, usize)>) -> &'a [f64] 
         raw.len()
     } else {
         (index + 1) * seg_len
-    };
+    }
+    .min(raw.len());
     &raw[start..end]
 }
 

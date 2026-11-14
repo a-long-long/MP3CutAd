@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::audio::cache;
-use crate::core::features::{self, MEL_BANDS};
+use crate::core::dsp::features::{self, MEL_BANDS};
 
-use super::state::{FileInfo, SharedState};
+use super::super::state::{FileInfo, SharedState};
 
 /// 能量包络高度
 const ENERGY_HEIGHT: f32 = 32.0;
@@ -37,12 +37,15 @@ pub fn show(ui: &mut egui::Ui, state: &SharedState, file_idx: usize, file: &File
     );
 
     // 命中缓存时只克隆纹理句柄（内部为 Arc），避免重复读取 FFT
-    let cached = {
+    let (cached, thresholds) = {
         let s = state.lock().unwrap();
-        s.viz_cache
-            .as_ref()
-            .filter(|c| c.key == key && c.width == width)
-            .map(|c| (c.energy.clone(), c.mel.clone()))
+        (
+            s.viz_cache
+                .as_ref()
+                .filter(|c| c.key == key && c.width == width)
+                .map(|c| (c.energy.clone(), c.mel.clone())),
+            s.thresholds,
+        )
     };
 
     let (energy_tex, mel_tex) = match cached {
@@ -79,7 +82,7 @@ pub fn show(ui: &mut egui::Ui, state: &SharedState, file_idx: usize, file: &File
             .small()
             .color(Color32::from_gray(150)),
     );
-    draw_textured(ui, &energy_tex, file, ENERGY_HEIGHT);
+    draw_textured(ui, &energy_tex, file, ENERGY_HEIGHT, thresholds);
 
     ui.add_space(2.0);
     ui.label(
@@ -87,11 +90,17 @@ pub fn show(ui: &mut egui::Ui, state: &SharedState, file_idx: usize, file: &File
             .small()
             .color(Color32::from_gray(150)),
     );
-    draw_textured(ui, &mel_tex, file, MEL_HEIGHT);
+    draw_textured(ui, &mel_tex, file, MEL_HEIGHT, thresholds);
 }
 
-/// 绘制纹理并在广告段位置叠加半透明红框
-fn draw_textured(ui: &mut egui::Ui, tex: &TextureHandle, file: &FileInfo, height: f32) {
+/// 绘制纹理并在有效广告段位置叠加半透明红框
+fn draw_textured(
+    ui: &mut egui::Ui,
+    tex: &TextureHandle,
+    file: &FileInfo,
+    height: f32,
+    thresholds: super::super::state::Thresholds,
+) {
     let width = ui.available_width();
     let (resp, painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
     let rect = resp.rect;
@@ -104,7 +113,7 @@ fn draw_textured(ui: &mut egui::Ui, tex: &TextureHandle, file: &FileInfo, height
     );
 
     let total = file.length.max(1) as f32;
-    for r in file.ad_ranges.iter().filter(|r| r.count > 1) {
+    for r in file.effective_ads(thresholds) {
         let x0 = rect.left() + rect.width() * r.begin as f32 / total;
         let x1 = rect.left() + rect.width() * r.end as f32 / total;
         let ad_rect =

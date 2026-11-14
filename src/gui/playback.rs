@@ -86,22 +86,26 @@ pub fn toggle_ad_playback(state: &SharedState, file_idx: usize, ad_idx: usize) {
         return;
     }
 
-    // 有其他段在播放 → 先让旧线程退出，避免两个音频叠加
+    // 有其他段在播放 → 通知旧线程退出，避免两个音频叠加
     if any_playing {
         *stop_flag.lock().unwrap() = true;
         thread::sleep(Duration::from_millis(150));
     }
-    *stop_flag.lock().unwrap() = false;
+
+    // 每次播放都使用全新的停止标志：复用同一个 flag 时，旧的播放线程可能
+    // 在标志被重新置为 false 后继续存活，导致两段音频叠加。
+    let new_stop_flag = Arc::new(Mutex::new(false));
 
     {
         let mut s = state.lock().unwrap();
         s.playback.playing_file = Some(file_idx);
         s.playback.playing_ad = Some(ad_idx);
+        s.playback.stop_flag = new_stop_flag.clone();
         s.status_message = format!("正在播放: {} 广告{}", file_name, ad_idx + 1);
     }
 
     let thread_state = state.clone();
-    let thread_stop_flag = stop_flag.clone();
+    let thread_stop_flag = new_stop_flag;
     thread::spawn(move || {
         preview_ad_segment(&file_path, &ad, thread_stop_flag);
 

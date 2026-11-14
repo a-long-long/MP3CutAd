@@ -7,10 +7,12 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
-/// 随机投影向量全局存储
-static VECTORS: OnceLock<Vec<Array2<f64>>> = OnceLock::new();
+/// 随机投影向量全局存储：(时间窗口大小, 频率 bin 数, 向量集合)
+///
+/// 维度变化时需要重建，因此不能用 `OnceLock`。
+static VECTORS: RwLock<Option<(usize, usize, Vec<Array2<f64>>)>> = RwLock::new(None);
 
 /// 哈希位数（增加到 16 位以提高区分度）
 const NUM_HASH_BITS: usize = 16;
@@ -23,20 +25,28 @@ pub const PROBE_RADIUS: usize = 2;
 /// - `time_size`: 时间窗口大小
 /// - `freq_size`: 频率 bin 数量
 pub fn init(time_size: usize, freq_size: usize) {
-    VECTORS.get_or_init(|| {
-        let mut rng = StdRng::seed_from_u64(1);
-        let mut vectors = Vec::with_capacity(NUM_HASH_BITS);
-
-        for _ in 0..NUM_HASH_BITS {
-            let mut vec = Array2::zeros((time_size, freq_size));
-            for val in vec.iter_mut() {
-                *val = rng.gen::<f64>() - 0.5;
+    // 尺寸未变则直接复用，避免重复生成
+    {
+        let guard = VECTORS.read().unwrap();
+        if let Some((t, f, _)) = guard.as_ref() {
+            if *t == time_size && *f == freq_size {
+                return;
             }
-            vectors.push(vec);
         }
+    }
 
-        vectors
-    });
+    let mut rng = StdRng::seed_from_u64(1);
+    let mut vectors = Vec::with_capacity(NUM_HASH_BITS);
+
+    for _ in 0..NUM_HASH_BITS {
+        let mut vec = Array2::zeros((time_size, freq_size));
+        for val in vec.iter_mut() {
+            *val = rng.gen::<f64>() - 0.5;
+        }
+        vectors.push(vec);
+    }
+
+    *VECTORS.write().unwrap() = Some((time_size, freq_size, vectors));
 }
 
 /// 计算两个频谱片段的余弦相似度（自动选择最优实现）
@@ -186,7 +196,8 @@ unsafe fn cosine_sim_avx2(
 /// # 返回
 /// 哈希值（16 位整数）
 pub fn hash(a: &Array2<f64>, offset: usize) -> i32 {
-    let vectors = VECTORS.get().expect("LSH 未初始化");
+    let guard = VECTORS.read().unwrap();
+    let (_, _, vectors) = guard.as_ref().expect("LSH 未初始化");
     let mut ret: i32 = 0;
 
     for vec in vectors {
@@ -243,9 +254,14 @@ pub fn multi_probe_hashes(base_hash: i32) -> Vec<i32> {
 mod tests {
     use super::*;
     use ndarray::Array2;
+    use std::sync::Mutex;
+
+    /// LSH 向量是全局状态，测试需串行，避免维度切换互相干扰
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_cosine_sim_identical() {
+        let _guard = TEST_LOCK.lock().unwrap();
         init(10, 32);
 
         let a: Array2<f64> = Array2::from_shape_fn((20, 32), |(i, j)| ((i * 32 + j) as f64).sin());
@@ -257,6 +273,7 @@ mod tests {
 
     #[test]
     fn test_cosine_sim_orthogonal() {
+        let _guard = TEST_LOCK.lock().unwrap();
         init(10, 32);
 
         let a: Array2<f64> = Array2::from_shape_fn((20, 32), |(i, _)| (i as f64).sin());
@@ -270,6 +287,7 @@ mod tests {
 
     #[test]
     fn test_hash_consistency() {
+        let _guard = TEST_LOCK.lock().unwrap();
         init(10, 32);
 
         let a: Array2<f64> = Array2::from_shape_fn((20, 32), |(i, j)| ((i * 32 + j) as f64).sin());
@@ -278,5 +296,22 @@ mod tests {
         let h1 = hash(&a, 0);
         let h2 = hash(&a, 0);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_init_rebuilds_on_dimension_change() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        init(10, 32);
+        let a: Array2<f64> = Array2::from_shape_fn((20, 32), |(i, j)| ((i * 32 + j) as f64).sin());
+        let _ = hash(&a, 0);
+
+        // 维度变化后必须重建，否则 cosine_sim 的宽度断言会失败
+        init(12, 16);
+        let b: Array2<f64> = Array2::from_shape_fn((20, 16), |(i, j)| ((i * 16 + j) as f64).cos());
+        let _ = hash(&b, 0);
+
+        // 切回原维度也应正常
+        init(10, 32);
+        assert_eq!(hash(&a, 0), hash(&a, 0));
     }
 }
