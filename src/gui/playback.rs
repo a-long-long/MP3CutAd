@@ -41,7 +41,10 @@ fn preview_ad_segment(file_path: &Path, ad: &Range, stop_flag: Arc<Mutex<bool>>)
         .skip_duration(Duration::from_secs_f64(start_secs))
         .take_duration(Duration::from_secs_f64(duration_secs));
 
-    let sink = Sink::try_new(&stream_handle).unwrap();
+    let Ok(sink) = Sink::try_new(&stream_handle) else {
+        eprintln!("无法创建音频输出流");
+        return;
+    };
     sink.append(source);
     sink.play();
 

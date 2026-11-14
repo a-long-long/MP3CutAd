@@ -265,7 +265,11 @@ fn cmd_auto(input_dir: &Path, output_dir: &Path) -> Result<()> {
             .map(|r| r.end - r.begin)
             .sum();
         let total = result.lengths[i] as i32;
-        let ratio = ad_duration as f64 / total as f64 * 100.0;
+        let ratio = if total > 0 {
+            ad_duration as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
         println!(
             "  {}: 检测到 {} 个广告，总时长 {:.1}s ({:.1}%)",
             file_name,

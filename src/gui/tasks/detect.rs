@@ -96,22 +96,41 @@ pub(crate) fn start_detection(state: &SharedState) {
         match result {
             Ok(Ok(result)) => {
                 let mut s = state.lock().unwrap();
+                let mut failed = 0usize;
                 for (i, (ranges, length)) in
                     result.ranges.into_iter().zip(result.lengths).enumerate()
                 {
                     if let Some(file) = s.files.get_mut(i) {
-                        file.ad_ranges = ranges;
-                        file.length = length;
-                        file.detected = true;
-                        file.needs_save = true;
+                        if length == 0 {
+                            // 预处理失败（FFT 为空）。GUI 没有控制台，stderr 警告不可见，
+                            // 这里显式清空状态而不是伪装成"已检测"。
+                            file.ad_ranges.clear();
+                            file.event_ranges.clear();
+                            file.length = 0;
+                            file.detected = false;
+                            file.needs_save = false;
+                            failed += 1;
+                        } else {
+                            file.ad_ranges = ranges;
+                            file.length = length;
+                            file.detected = true;
+                            file.needs_save = true;
+                        }
                     }
                 }
                 s.is_processing = false;
                 s.progress = 1.0;
-                s.status_message = match &result.gpu {
+                let mut message = match &result.gpu {
                     Some(gpu) => format!("检测完成！（GPU 加速: {}）", gpu),
                     None => "检测完成！".to_string(),
                 };
+                if failed > 0 {
+                    message.push_str(&format!(
+                        " {} 个文件预处理失败已跳过（请检查文件是否损坏或格式不支持）",
+                        failed
+                    ));
+                }
+                s.status_message = message;
             }
             Ok(Err(e)) => {
                 let mut s = state.lock().unwrap();

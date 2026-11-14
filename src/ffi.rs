@@ -87,16 +87,18 @@ pub unsafe extern "C" fn mp3cutad_detect(
         } else {
             slice::from_raw_parts(files_ptr, files_count as usize)
         };
-        let files: Vec<PathBuf> = files_slice
-            .iter()
-            .filter_map(|&p| {
-                if p.is_null() {
-                    None
-                } else {
-                    CStr::from_ptr(p).to_str().ok().map(PathBuf::from)
-                }
-            })
-            .collect();
+        // 必须与调用方下标一一对应：任一无效路径都直接报错，
+        // 不能静默丢弃，否则返回的区间会被配到错误的文件上。
+        let mut files: Vec<PathBuf> = Vec::with_capacity(files_slice.len());
+        for (i, &p) in files_slice.iter().enumerate() {
+            if p.is_null() {
+                return Err(format!("invalid argument: files[{}] is null", i));
+            }
+            match CStr::from_ptr(p).to_str() {
+                Ok(s) => files.push(PathBuf::from(s)),
+                Err(e) => return Err(format!("invalid path at index {}: {}", i, e)),
+            }
+        }
 
         match detect::detect_ad(&files) {
             Ok(d) => Ok(d),

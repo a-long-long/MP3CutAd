@@ -2,7 +2,7 @@
 //!
 //! 提供音频解码（转 WAV）和音频裁剪功能，支持 ffmpeg 能解码的所有格式
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
@@ -130,6 +130,17 @@ pub fn concat_audio(list_file: &Path, output: &Path) -> Result<()> {
     })
 }
 
+/// 生成 concat 列表中安全的路径写法
+///
+/// ffmpeg 的 concat demuxer 用单引号包裹路径：
+/// - Windows 反斜杠会被当作转义符，统一改用正斜杠；
+/// - 路径中的单引号需写成 `'\''`，否则会提前结束引号。
+fn concat_list_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "'\\''")
+}
+
 /// 裁剪并拼接音频（按照 C# 版本的逻辑）
 ///
 /// 输出容器格式由 `output` 的扩展名决定，保持与原文件一致。
@@ -139,7 +150,12 @@ pub fn concat_audio(list_file: &Path, output: &Path) -> Result<()> {
 /// - `output`: 输出文件
 /// - `segments`: 要保留的时间段列表（单位：0.1秒）
 pub fn cut_and_combine(input: &Path, output: &Path, segments: &[(i32, i32)]) -> Result<()> {
-    // 临时文件创建在输出文件旁边（与 C# 版本一致）
+    if segments.is_empty() {
+        bail!("没有可保留的音频片段");
+    }
+
+    // 临时文件创建在输出文件旁边（与 C# 版本一致），但文件名带进程号与随机串，
+    // 避免覆盖或删除输出目录中已有的同名文件。
     let output_dir = output.parent().unwrap_or(Path::new("."));
     let base_name = output.file_stem().unwrap_or_default().to_string_lossy();
     // 临时片段使用与输出相同的扩展名，保证 -c copy 产出相同容器
@@ -147,31 +163,35 @@ pub fn cut_and_combine(input: &Path, output: &Path, segments: &[(i32, i32)]) -> 
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
         .unwrap_or_else(|| "mp3".to_string());
+    let token = format!("{}_{}", std::process::id(), rand::random::<u32>());
 
-    let mut temp_files = Vec::new();
-    let mut list_content = String::new();
+    let mut temp_files: Vec<std::path::PathBuf> = Vec::new();
+    let result = (|| -> Result<()> {
+        let mut list_content = String::new();
 
-    // 裁剪每个片段
-    for (i, &(begin, end)) in segments.iter().enumerate() {
-        let from_sec = begin as f64 / 10.0;
-        let to_sec = end as f64 / 10.0;
+        // 裁剪每个片段
+        for (i, &(begin, end)) in segments.iter().enumerate() {
+            let from_sec = begin as f64 / 10.0;
+            let to_sec = end as f64 / 10.0;
 
-        let temp_file = output_dir.join(format!("{}_{}.{}", base_name, i, ext));
-        split_audio(input, &temp_file, from_sec, to_sec)?;
+            let temp_file = output_dir.join(format!(".{}_{}_{}.{}", base_name, token, i, ext));
+            // 先登记再执行：即使切割中途失败，半成品也会被统一清理
+            temp_files.push(temp_file.clone());
+            split_audio(input, &temp_file, from_sec, to_sec)?;
 
-        list_content.push_str(&format!("file '{}'\n", temp_file.display()));
-        temp_files.push(temp_file);
-    }
+            list_content.push_str(&format!("file '{}'\n", concat_list_path(&temp_file)));
+        }
 
-    // 写入列表文件（与 C# 版本：wav + ".list"）
-    let list_file = output_dir.join(format!("{}.list", base_name));
-    std::fs::write(&list_file, &list_content)?;
-    temp_files.push(list_file.clone());
+        // 写入列表文件
+        let list_file = output_dir.join(format!(".{}_{}.list", base_name, token));
+        temp_files.push(list_file.clone());
+        std::fs::write(&list_file, &list_content)?;
 
-    // 拼接
-    let result = concat_audio(&list_file, output);
+        // 拼接
+        concat_audio(&list_file, output)
+    })();
 
-    // 清理临时文件（C# 版本不清理，但我们应该清理）
+    // 成功或失败都清理临时文件
     for f in &temp_files {
         let _ = std::fs::remove_file(f);
     }
@@ -200,5 +220,19 @@ mod tests {
         } else {
             println!("FFmpeg 未安装，跳过测试");
         }
+    }
+
+    #[test]
+    fn concat_list_path_escapes_windows_separators_and_quotes() {
+        // 反斜杠统一转正斜杠；单引号按 ffmpeg 规则写成 '\''
+        assert_eq!(
+            concat_list_path(Path::new(r"E:\music\a b\c' d.mp3")),
+            "E:/music/a b/c'\\'' d.mp3"
+        );
+        // 中文与空格无需额外处理
+        assert_eq!(
+            concat_list_path(Path::new("E:/音乐/广告 1.mp3")),
+            "E:/音乐/广告 1.mp3"
+        );
     }
 }

@@ -189,27 +189,7 @@ where
         y[i] = *label_idx;
     }
 
-    // 2. 标准化
-    let mut mean = vec![0.0f64; dim];
-    let mut std = vec![0.0f64; dim];
-    for j in 0..dim {
-        let sum: f64 = (0..n_samples).map(|i| x[[i, j]]).sum();
-        mean[j] = sum / n_samples as f64;
-    }
-    for j in 0..dim {
-        let var: f64 = (0..n_samples)
-            .map(|i| (x[[i, j]] - mean[j]).powi(2))
-            .sum::<f64>()
-            / n_samples as f64;
-        std[j] = var.sqrt().max(1e-12);
-    }
-    for i in 0..n_samples {
-        for j in 0..dim {
-            x[[i, j]] = (x[[i, j]] - mean[j]) / std[j];
-        }
-    }
-
-    // 3. 划分训练集 / 测试集
+    // 2. 划分训练集 / 测试集
     let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
     let mut indices: Vec<usize> = (0..n_samples).collect();
     indices.shuffle(&mut rng);
@@ -217,6 +197,29 @@ where
         .min(n_samples.saturating_sub(1));
     let test_set: std::collections::HashSet<usize> = indices.iter().take(n_test).copied().collect();
     let train_idx: Vec<usize> = indices.iter().skip(n_test).copied().collect();
+
+    // 3. 标准化：只用训练集统计量，再应用到全部样本，避免测试集信息泄漏
+    let train_len = train_idx.len().max(1) as f64;
+    let mut mean = vec![0.0f64; dim];
+    for (j, m) in mean.iter_mut().enumerate() {
+        let sum: f64 = train_idx.iter().map(|&i| x[[i, j]]).sum();
+        *m = sum / train_len;
+    }
+    let mut std = vec![0.0f64; dim];
+    for (j, s) in std.iter_mut().enumerate() {
+        let var: f64 = train_idx
+            .iter()
+            .map(|&i| (x[[i, j]] - mean[j]).powi(2))
+            .sum::<f64>()
+            / train_len;
+        *s = var.sqrt().max(1e-12);
+    }
+    for i in 0..n_samples {
+        for j in 0..dim {
+            x[[i, j]] = (x[[i, j]] - mean[j]) / std[j];
+        }
+    }
+
     let train_x = x.select(ndarray::Axis(0), &train_idx);
     let train_y: Vec<usize> = train_idx.iter().map(|&i| y[i]).collect();
 

@@ -120,6 +120,13 @@ fn save_all(state: &SharedState) {
                 if let Some(f) = s.files.get_mut(file_idx) {
                     f.needs_save = false;
                     f.marked_for_deletion.clear();
+                    // 覆盖后磁盘文件已变短，旧的时间轴与区间不能再用于二次裁剪
+                    if overwrite {
+                        f.reset_detection();
+                    }
+                }
+                if overwrite {
+                    s.ads_to_delete.retain(|&(fi, _)| fi != file_idx);
                 }
             }
             Err(e) => {
@@ -135,7 +142,10 @@ fn save_all(state: &SharedState) {
     s.progress = 1.0;
     s.status_message = if failures.is_empty() {
         if overwrite {
-            format!("保存完成！已覆盖原文件 ({} 个文件)", saved)
+            format!(
+                "保存完成！已覆盖原文件 ({} 个文件)，请重新检测后再操作",
+                saved
+            )
         } else {
             format!(
                 "保存完成！输出目录: {} ({} 个文件)",

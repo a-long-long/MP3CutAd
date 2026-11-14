@@ -135,6 +135,17 @@ impl FileInfo {
     pub fn needs_cut(&self) -> bool {
         self.detected && !self.marked_for_deletion.is_empty()
     }
+
+    /// 覆盖保存后原检测结果已与磁盘文件不一致，清空以免二次裁剪切错位置
+    pub fn reset_detection(&mut self) {
+        self.length = 0;
+        self.ad_ranges.clear();
+        self.event_ranges.clear();
+        self.detected = false;
+        self.classified = false;
+        self.needs_save = false;
+        self.marked_for_deletion.clear();
+    }
 }
 
 /// 把选中的广告段标记为删除
@@ -418,5 +429,35 @@ mod tests {
 
         assert_eq!(files[0].marked_for_deletion, vec![0]);
         assert!(!files[0].needs_cut());
+    }
+
+    #[test]
+    fn reset_detection_clears_stale_timeline() {
+        let mut file = FileInfo {
+            detected: true,
+            classified: true,
+            length: 1000,
+            needs_save: true,
+            ad_ranges: vec![range(100, 200, 2)],
+            event_ranges: vec![EventRange {
+                begin: 100,
+                end: 200,
+                label: "广告".to_string(),
+                confidence: 0.9,
+            }],
+            marked_for_deletion: vec![0],
+            ..Default::default()
+        };
+
+        file.reset_detection();
+
+        assert_eq!(file.length, 0);
+        assert!(!file.detected);
+        assert!(!file.classified);
+        assert!(!file.needs_save);
+        assert!(file.ad_ranges.is_empty());
+        assert!(file.event_ranges.is_empty());
+        assert!(file.marked_for_deletion.is_empty());
+        assert!(!file.needs_cut());
     }
 }
